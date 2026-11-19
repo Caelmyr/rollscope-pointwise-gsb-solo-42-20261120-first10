@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Capture format / RollScope</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/"><span class="brand-icon" aria-hidden="true"><i></i><i></i><i></i></span>RollScope</a><span class="separator"></span><span class="top-label">Capture format</span></header>
+  <main class="guide" aria-label="Capture guide">
+    <a class="text-action" href="/">← Back to inspection</a>
+    <h1>Capture format</h1>
+    <p>Open a NumPy NPZ containing the scan, encoder positions, acquisition times, and independent flat-field references. Download the synthetic capture from the library as a working example.</p>
+    <table>
+      <thead><tr><th>Member</th><th>Shape and scalar type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>raw</td><td>8–4096 × 16–1024 integers</td><td>Sensor codes 0–65535, scan lines in arrival order</td></tr>
+        <tr><td>ticks</td><td>One integer per line</td><td>Nondecreasing encoder tick, including multiple scans at the same tick</td></tr>
+        <tr><td>seconds</td><td>One number per line</td><td>Strictly increasing time in seconds, at least 1 ns apart</td></tr>
+        <tr><td>dark, white</td><td>1–64 passes × raw columns each</td><td>Dark and white reference sensor codes in the same detector columns</td></tr>
+        <tr><td>metadata_utf8</td><td>1D uint8</td><td>UTF-8 JSON carrying capture metadata and physical geometry</td></tr>
+      </tbody>
+    </table>
+    <h2>Metadata example</h2>
+    <pre>{
+  "name": "Coil R24-071 / side A",
+  "material": "Cold-rolled steel",
+  "description": "Synthetic demonstration",
+  "synthetic": true,
+  "geometry": {
+    "tick_mm": 0.18,
+    "column_mm": 0.28,
+    "station_origin_mm": 1200,
+    "transverse_origin_mm": 0
+  }
+}</pre>
+    <p>Station is origin plus tick × pitch. Transverse position is origin plus a zero-based column × pitch. Reflection values are dimensionless relative to the dark and white references. The preview applies display scaling; the probe and evidence retain measured values.</p>
+    <h2>Review workflow</h2>
+    <ol>
+      <li>Open the raw scan and check acquisition events. Use Coverage to see gaps and rejected detector columns separately.</li>
+      <li>Use Strip geometry or a surface analysis. Choose Settings to adjust the analysis and save a report before exploring different values.</li>
+      <li>Click an image cell to see contributing source lines. Use Review windows for a saved physical interval or Ruler for a two-point measurement.</li>
+      <li>Export ZIP evidence from the current analysis, window, ruler, or saved report. Back up and restore the whole inspection from the capture library.</li>
+    </ol>
+    <p>The library accepts up to 64 captures and up to 512 MiB of source data. The uniform station grid is capped at 3,000,000 cells. These measurements are intended for exploratory inspection.</p>
+  </main>
+</body>
+</html>

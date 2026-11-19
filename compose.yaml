@@ -1,0 +1,17 @@
+name: solo45-rollscope
+services:
+  rollscope:
+    build: .
+    image: solo45-rollscope:1.0
+    network_mode: bridge
+    ports:
+      - "127.0.0.1:${ROLLSCOPE_PORT:-18945}:8000"
+    volumes:
+      - capture-data:/var/lib/rollscope
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200"]
+      interval: 5s
+      timeout: 5s
+      retries: 8
+volumes:
+  capture-data:

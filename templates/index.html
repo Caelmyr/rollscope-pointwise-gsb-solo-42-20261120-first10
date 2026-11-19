@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101625">
+  <title>RollScope / Line-scan inspection</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <script type="module" src="{{ url_for('static', filename='app.js') }}"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="RollScope home"><span class="brand-icon" aria-hidden="true"><i></i><i></i><i></i></span>RollScope</a>
+    <span class="separator"></span>
+    <span class="top-label">Line-scan inspection</span>
+    <div class="top-actions">
+      <a href="/guide">Capture format</a>
+      <span class="system"><span></span>Local workspace</span>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="capture-head">
+      <div>
+        <label class="eyebrow" for="capture-picker">Capture library</label>
+        <div class="title-line">
+          <h1 id="capture-name">Roll inspection</h1>
+          <span class="badge" id="capture-badge" hidden>Synthetic</span>
+        </div>
+        <p id="capture-meta" class="capture-meta">Opening the local capture library…</p>
+      </div>
+      <div class="capture-actions">
+        <select id="capture-picker" aria-label="Active capture"><option>Loading…</option></select>
+        <button class="button" id="library-button" type="button">Manage captures</button>
+        <button class="button primary" id="snapshot-button" type="button">Save report</button>
+      </div>
+    </section>
+
+    <section class="readings" id="readings" aria-label="Capture readings"></section>
+
+    <div class="desk">
+      <nav class="sidebar" aria-label="Inspection sections" id="navigation">
+        <div class="sidebar-section">
+          <h2>Capture</h2>
+          <button type="button" data-section="overview"><span class="nav-icon"><i></i><i></i><i></i></span>Station view</button>
+          <button type="button" data-section="sensor"><span class="nav-icon line-icon"><i></i><i></i><i></i></span>Raw scan</button>
+          <button type="button" data-section="flat"><span class="nav-icon ring-icon"><i></i></span>Flat field</button>
+          <button type="button" data-section="coverage"><span class="nav-icon check-icon"><i></i><i></i><i></i></span>Coverage</button>
+        </div>
+        <div class="sidebar-section">
+          <h2>Material</h2>
+          <button type="button" data-section="edges"><span class="nav-icon edge-icon"><i></i><i></i></span>Strip geometry</button>
+          <button type="button" data-section="spots"><span class="nav-icon dot-icon"><i></i><i></i><i></i></span>Surface spots</button>
+          <button type="button" data-section="streaks"><span class="nav-icon streak-icon"><i></i><i></i><i></i></span>Streaks</button>
+          <button type="button" data-section="marks"><span class="nav-icon mark-icon"><i></i><i></i><i></i></span>Repeat pitch</button>
+          <button type="button" data-section="splices"><span class="nav-icon join-icon"><i></i><i></i></span>Transverse joins</button>
+          <button type="button" data-section="texture"><span class="nav-icon texture-icon"><i></i><i></i><i></i></span>Texture</button>
+          <button type="button" data-section="illumination"><span class="nav-icon trend-icon"><i></i><i></i><i></i></span>Reflectance trend</button>
+        </div>
+        <div class="sidebar-section review-nav">
+          <h2>Review</h2>
+          <button type="button" data-section="windows"><span class="nav-icon box-icon"><i></i></span>Review windows</button>
+          <button type="button" data-section="ruler"><span class="nav-icon ruler-icon"><i></i><i></i><i></i></span>Ruler</button>
+          <button type="button" data-section="snapshots"><span class="nav-icon report-icon"><i></i><i></i><i></i></span>Saved reports</button>
+        </div>
+      </nav>
+
+      <section class="workarea" aria-labelledby="view-title">
+        <div class="panel-head">
+          <div>
+            <h2 id="view-title">Station overview</h2>
+            <p id="view-subtitle">Reflectance aligned to encoder station</p>
+          </div>
+          <div class="toolbar">
+            <select id="window-picker" aria-label="Viewport window"><option value="">Full capture</option></select>
+            <label class="toggle">
+              <input type="checkbox" id="overlay-toggle" checked>
+              <span>Overlays</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="viewport" id="viewport">
+          <div class="y-axis"><span id="axis-y-caption">STATION · MM</span></div>
+          <div class="axis-ticks y-ticks" id="axis-y-ticks" aria-hidden="true"></div>
+          <div class="image-frame" id="image-frame">
+            <img id="raster" alt="Current line-scan image" draggable="false">
+            <div class="empty-image" id="empty-image">Loading capture…</div>
+            <div class="marker" id="marker" hidden></div>
+            <canvas class="ruler-layer" id="ruler-layer" aria-hidden="true"></canvas>
+          </div>
+          <div class="axis-ticks x-ticks" id="axis-x-ticks" aria-hidden="true"></div>
+          <div class="x-axis">TRANSVERSE POSITION · MM</div>
+        </div>
+
+        <div class="legend" id="legend"></div>
+        <div class="view-footer">
+          <span id="view-footnote">Select a pixel to inspect its source lines.</span>
+          <span id="grid-size" class="mono"></span>
+        </div>
+      </section>
+
+      <aside class="inspector" aria-label="Inspector">
+        <div class="inspector-top">
+          <div class="inspector-heading">
+            <h2>Inspector</h2>
+            <a id="section-download" class="text-action" hidden>Export ZIP <span aria-hidden="true">↗</span></a>
+          </div>
+          <div class="tab-list" id="detail-tabs" aria-label="Inspector views">
+            <button type="button" data-tab="analysis">Analysis</button>
+            <button type="button" data-tab="settings">Settings</button>
+            <button type="button" data-tab="probe">Probe</button>
+            <button type="button" data-tab="notes">Notes</button>
+          </div>
+        </div>
+        <div class="detail-body" id="detail-body" tabindex="0"></div>
+      </aside>
+    </div>
+
+    <section class="data-panel" id="data-panel" hidden>
+      <div class="report-head">
+        <div><h2 id="tables-heading">Measurements</h2><p id="tables-subhead"></p></div>
+      </div>
+      <div id="tables"></div>
+    </section>
+
+    <footer class="page-footer">
+      <span>RollScope {{ version }}</span>
+      <span id="source-sha"></span>
+    </footer>
+  </main>
+
+  <div id="status" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <dialog id="library-dialog" aria-labelledby="lib-title">
+    <div class="dialog-head"><h2 id="lib-title">Capture library</h2><button class="icon-button" data-close="library-dialog" aria-label="Close">×</button></div>
+    <div class="dialog-content">
+      <section class="library-block">
+        <h3>Synthetic captures</h3>
+        <div id="demo-list" class="demo-list"></div>
+      </section>
+      <section class="library-block">
+        <h3>Import</h3>
+        <div class="import-list">
+          <label class="button">Open capture NPZ<input id="capture-file" type="file" accept=".npz"></label>
+          <label class="button">Restore project ZIP<input id="project-file" type="file" accept=".zip"></label>
+        </div>
+        <a href="/guide" class="help-link">See accepted array shapes and units ↗</a>
+      </section>
+      <section class="library-block">
+        <h3>Current capture</h3>
+        <div class="import-list">
+          <a id="source-download" class="button">Download source NPZ</a>
+          <a id="project-download" class="button">Back up project ZIP</a>
+        </div>
+      </section>
+    </div>
+  </dialog>
+
+  <dialog id="snapshot-dialog" aria-labelledby="snapshot-title">
+    <div class="dialog-head"><h2 id="snapshot-title">Save inspection report</h2><button class="icon-button" data-close="snapshot-dialog" aria-label="Close">×</button></div>
+    <form id="snapshot-form" class="dialog-content">
+      <label class="field">Report name<input id="snapshot-label" name="label" required maxlength="75"></label>
+      <p id="snapshot-section-label" class="muted"></p>
+      <button class="button primary" type="submit">Save report</button>
+    </form>
+  </dialog>
+</body>
+</html>
