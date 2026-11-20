@@ -3,6 +3,7 @@ from dataclasses import replace
 from threading import RLock
 
 from . import __version__
+from .alignment import build_report, leg_assignment, parse_log_text
 from .analysis import AnalysisCache, AnalysisContext, AnalysisPresenter, inspect_summary
 from .archive import project_export, read_project
 from .capture_codec import read_capture
@@ -14,7 +15,7 @@ from .measure_export import export_ruler
 from .probe import cross_section, point_measurement, view_extent
 from .raster import ACQUISITION_LAYERS, RasterSpec, png_bytes, preview_image
 from .ruler import Ruler, evaluate_ruler
-from .records import InspectionSnapshot, ReviewWindow, identifier, utc_now
+from .records import InspectionSnapshot, LogAlignment, ReviewWindow, identifier, utc_now
 from .window_review import review_window
 
 
@@ -113,6 +114,51 @@ class CaptureService:
     def set_notes(self, ref, expected, notes):
         state = self.repository.mutate(ref, expected, lambda current: current.with_notes(notes))
         return state.as_dict()
+
+    def alignment(self, ref, expected):
+        record, context = self.configured(ref, expected)
+        saved = record.state.alignment
+        if saved is None:
+            return {"alignment": None, "revision": record.state.revision}
+        report = build_report(record.capture, context.grid, context.coverage.gaps, saved)
+        return {
+            "alignment": saved.as_dict(),
+            "report": report,
+            "revision": record.state.revision,
+        }
+
+    def preview_alignment(self, ref, payload):
+        self.read(ref)
+        events, warnings = parse_log_text(payload["log_text"])
+        legs = leg_assignment(events)
+        return {
+            "events": [
+                event.as_dict() | {"leg": legs[index]} for index, event in enumerate(events)
+            ],
+            "rollback_count": legs[-1] if legs else 0,
+            "warnings": warnings,
+        }
+
+    def save_alignment(self, ref, expected, payload):
+        record, context = self.configured(ref, expected)
+        events, warnings = parse_log_text(payload["log_text"])
+        alignment = LogAlignment.build(payload, events, record.capture)
+        state = self.repository.mutate(
+            ref, expected, lambda current: current.with_alignment(alignment)
+        )
+        report = build_report(record.capture, context.grid, context.coverage.gaps, alignment)
+        return {
+            "state": state.as_dict(),
+            "alignment": alignment.as_dict(),
+            "report": report,
+            "warnings": warnings,
+        }
+
+    def clear_alignment(self, ref, expected):
+        state = self.repository.mutate(
+            ref, expected, lambda current: current.with_alignment(None)
+        )
+        return {"state": state.as_dict()}
 
     def write_window(self, ref, expected, data, window_id=None):
         record, context = self.configured(ref, expected)

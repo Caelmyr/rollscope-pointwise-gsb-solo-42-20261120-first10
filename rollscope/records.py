@@ -1,4 +1,5 @@
-from dataclasses import dataclass, replace
+import re
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -10,6 +11,7 @@ from .domain import (
     clean_text,
     exact_keys,
     expect_object,
+    finite_number,
     read_enum,
     reject_unknown,
 )
@@ -18,6 +20,10 @@ from .settings import AnalysisSettings
 
 MAX_WINDOWS = 40
 MAX_SNAPSHOTS = 40
+MAX_LOG_EVENTS = 400
+MAX_LOG_ANCHORS = 60
+MAX_LOG_TEXT = 30000
+EVENT_ID = re.compile(r"e[0-9]{1,3}")
 
 
 def utc_now():
@@ -69,12 +75,141 @@ class ReviewWindow:
 
 
 @dataclass(frozen=True)
+class LogEvent:
+    id: str
+    kind: str
+    note: str
+    start_text: str
+    end_text: str
+    start_s: float
+    end_s: float
+
+    @classmethod
+    def stored(cls, data):
+        data = expect_object(data, "Stored log record")
+        exact_keys(
+            data,
+            ("id", "kind", "note", "start_text", "end_text", "start_s", "end_s"),
+            "Stored log record",
+        )
+        ref = clean_text(data["id"], "Log record id", 12)
+        if EVENT_ID.fullmatch(ref) is None:
+            raise UserInputError("A stored log record id is invalid.")
+        event = cls(
+            ref,
+            clean_text(data["kind"], "Log record kind", 40),
+            clean_text(data["note"], "Log record note", 200, True),
+            clean_text(data["start_text"], "Log record start", 60),
+            clean_text(data["end_text"], "Log record end", 60),
+            finite_number(data["start_s"], "Log record start seconds", -1e12, 1e12),
+            finite_number(data["end_s"], "Log record end seconds", -1e12, 1e12),
+        )
+        if event.end_s < event.start_s:
+            raise UserInputError("A stored log record ends before it starts.")
+        return event
+
+    def as_dict(self):
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class EventAnchor:
+    event_id: str
+    station_start_mm: float
+    station_end_mm: float
+
+    @classmethod
+    def make(cls, data, event_ids, capture=None):
+        data = expect_object(data, "Event anchor")
+        exact_keys(
+            data, ("event_id", "station_start_mm", "station_end_mm"), "Event anchor"
+        )
+        event_id = clean_text(data["event_id"], "Anchor record", 12)
+        if event_id not in event_ids:
+            raise UserInputError(f"An anchor refers to unknown log record {event_id}.")
+        anchor = cls(
+            event_id,
+            finite_number(data["station_start_mm"], "Anchor start", -1e8, 1e8),
+            finite_number(data["station_end_mm"], "Anchor end", -1e8, 1e8),
+        )
+        if anchor.station_start_mm >= anchor.station_end_mm:
+            raise UserInputError("An anchor station range must have positive length.")
+        if capture is not None:
+            overview = capture.overview()
+            if (
+                anchor.station_start_mm < overview["station_start_mm"]
+                or anchor.station_end_mm > overview["station_end_mm"]
+            ):
+                raise UserInputError(
+                    "Anchor station ranges must lie inside the captured station range."
+                )
+        return anchor
+
+    def as_dict(self):
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class LogAlignment:
+    log_text: str
+    events: tuple
+    anchors: tuple
+    certainty_mm: float
+
+    @classmethod
+    def build(cls, data, events, capture):
+        data = expect_object(data, "Log alignment")
+        exact_keys(data, ("log_text", "anchors", "certainty_mm"), "Log alignment")
+        log_text = clean_text(data["log_text"], "Operation log", MAX_LOG_TEXT)
+        certainty = finite_number(data["certainty_mm"], "Certainty band", 0.1, 5000)
+        return cls(log_text, events, read_anchors(data["anchors"], events, capture), certainty)
+
+    @classmethod
+    def stored(cls, data, capture=None):
+        data = expect_object(data, "Stored log alignment")
+        exact_keys(
+            data, ("log_text", "events", "anchors", "certainty_mm"), "Stored log alignment"
+        )
+        raw_events = data["events"]
+        if not isinstance(raw_events, list) or not 1 <= len(raw_events) <= MAX_LOG_EVENTS:
+            raise UserInputError("The stored log alignment has an invalid record list.")
+        events = tuple(LogEvent.stored(item) for item in raw_events)
+        if len({event.id for event in events}) != len(events):
+            raise UserInputError("The stored log alignment repeats a record id.")
+        return cls(
+            clean_text(data["log_text"], "Operation log", MAX_LOG_TEXT),
+            events,
+            read_anchors(data["anchors"], events, capture),
+            finite_number(data["certainty_mm"], "Certainty band", 0.1, 5000),
+        )
+
+    def as_dict(self):
+        return {
+            "log_text": self.log_text,
+            "certainty_mm": self.certainty_mm,
+            "events": [event.as_dict() for event in self.events],
+            "anchors": [anchor.as_dict() for anchor in self.anchors],
+        }
+
+
+def read_anchors(raw, events, capture):
+    if not isinstance(raw, list) or len(raw) > MAX_LOG_ANCHORS:
+        raise UserInputError(f"Provide at most {MAX_LOG_ANCHORS} anchors.")
+    event_ids = {event.id for event in events}
+    anchors = tuple(EventAnchor.make(item, event_ids, capture) for item in raw)
+    if len({anchor.event_id for anchor in anchors}) != len(anchors):
+        raise UserInputError("Each log record can carry at most one anchor.")
+    return anchors
+
+
+@dataclass(frozen=True)
 class CaptureState:
     revision: int
     settings: AnalysisSettings
     windows: tuple
     notes: str
     updated_at: str
+    alignment: LogAlignment | None = None
 
     @classmethod
     def create(cls, timestamp):
@@ -82,12 +217,14 @@ class CaptureState:
 
     @classmethod
     def from_dict(cls, data):
+        alignment = data.get("alignment")
         return cls(
             data["revision"],
             AnalysisSettings.parse(data["settings"]),
             tuple(ReviewWindow.stored(item) for item in data["windows"]),
             data["notes"],
             data["updated_at"],
+            LogAlignment.stored(alignment) if alignment is not None else None,
         )
 
     def as_dict(self):
@@ -97,6 +234,7 @@ class CaptureState:
             "windows": [window.as_dict() for window in self.windows],
             "notes": self.notes,
             "updated_at": self.updated_at,
+            "alignment": self.alignment.as_dict() if self.alignment else None,
         }
 
     def settings_patch(self, data):
@@ -110,6 +248,9 @@ class CaptureState:
     def with_notes(self, value):
         notes = clean_text(value, "Capture notes", 4000, True)
         return replace(self, notes=notes)
+
+    def with_alignment(self, alignment):
+        return replace(self, alignment=alignment)
 
     def get_window(self, ref):
         for window in self.windows:

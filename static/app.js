@@ -14,6 +14,7 @@ const VIEW = {
   illumination: ['Reflectance trend', 'Across-strip and along-roll material reflectance', 'illumination'],
   windows: ['Review windows', 'Saved bounds in physical station coordinates', 'station'],
   ruler: ['Ruler', 'Measure across sheet, bad pixels and acquisition gaps', 'station'],
+  alignment: ['Event alignment', 'Operation log mapped onto material stations', 'station'],
   snapshots: ['Saved reports', 'Previously recorded measurements and settings', 'station'],
 }
 
@@ -77,6 +78,7 @@ const LEGEND = {
   splices: [['splice', 'Join candidate'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   texture: [['edge', 'Stripe direction'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   illumination: [['reflectance', 'Reflectance'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
+  alignment: [['anchor', 'Anchor range'], ['confident', 'Confident band'], ['ambiguous', 'Ambiguous band'], ['gap', 'Acquisition gap']],
 }
 
 const REGION = [
@@ -101,13 +103,18 @@ const chosen = {
   profile: null,
   rulerPoints: [],
   ruler: null,
+  alignment: null,
+  alignmentHit: null,
+  draft: null,
+  parsed: null,
+  pickTarget: null,
   request: 0,
   load: 0,
   probeRequest: 0,
 }
 
 let toastTimer
-const regularView = () => !['windows', 'ruler', 'snapshots'].includes(chosen.section)
+const regularView = () => !['windows', 'ruler', 'snapshots', 'alignment'].includes(chosen.section)
 const layer = () => VIEW[chosen.section][2]
 const revision = () => chosen.capture.state.revision
 const base = () => '/api/captures/' + chosen.capture.id
@@ -206,6 +213,7 @@ async function openCapture(id, reset = true) {
     Object.assign(chosen, {
       section: 'overview', tab: 'analysis', window: '', reviewed: '', snapshot: null,
       compare: null, probe: null, profile: null, ruler: null, rulerPoints: [],
+      alignment: null, alignmentHit: null, draft: null, parsed: null, pickTarget: null,
     })
   }
   $('#capture-picker').value = detail.id
@@ -271,7 +279,9 @@ async function renderView() {
   }))
   $('#view-footnote').textContent = chosen.section === 'ruler'
     ? 'Select two points on the station image.'
-    : 'Select a pixel to inspect its source lines.'
+    : chosen.section === 'alignment'
+      ? 'Click the image to list the log records covering that station.'
+      : 'Select a pixel to inspect its source lines.'
   const sectionLink = $('#section-download')
   sectionLink.hidden = !regularView()
   if (regularView()) {
@@ -283,20 +293,26 @@ async function renderView() {
   const analysisURL = regularView()
     ? anchorURL(base() + '/analysis/' + chosen.section, { revision: revision() })
     : null
+  const alignmentURL = chosen.section === 'alignment'
+    ? anchorURL(base() + '/alignment', { revision: revision() })
+    : null
   chosen.extent = null
   chosen.analysis = null
   chosen.probe = null
   chosen.profile = null
+  chosen.alignmentHit = null
   renderInspector()
   renderTables()
   try {
     const result = await Promise.all([
       json(viewURL),
       analysisURL ? json(analysisURL) : Promise.resolve(null),
+      alignmentURL ? json(alignmentURL) : Promise.resolve(null),
     ])
     if (token !== chosen.request) return
     chosen.extent = result[0]
     chosen.analysis = result[1]
+    chosen.alignment = result[2]
   } catch (error) {
     if (token === chosen.request) showErrorImage(error)
     throw error
@@ -310,6 +326,7 @@ async function renderView() {
   renderInspector()
   renderTables()
   redrawRuler()
+  redrawAlignment()
 }
 
 function spacedTicks(first, last, count) {
@@ -360,6 +377,7 @@ function renderInspector() {
   if (chosen.tab === 'notes') return renderNotes(body)
   if (chosen.section === 'windows') return renderWindows(body)
   if (chosen.section === 'ruler') return renderRuler(body)
+  if (chosen.section === 'alignment') return renderAlignment(body)
   if (chosen.section === 'snapshots') return renderSnapshots(body)
   if (!chosen.analysis) {
     body.append(copy('Loading measurements…'))
@@ -392,7 +410,54 @@ function tableBlocks() {
     ]
   }
   if (chosen.section === 'snapshots' && chosen.snapshot) return chosen.snapshot.result.tables
+  if (chosen.section === 'alignment' && chosen.alignment?.report) {
+    const report = chosen.alignment.report
+    const blocks = [
+      { title: 'Clock legs', rows: report.legs.map(legRow) },
+      { title: 'Event placements', rows: report.placements.map(placementRow) },
+    ]
+    const anchors = chosen.alignment.alignment?.anchors || []
+    if (anchors.length) blocks.push({ title: 'Anchors', rows: anchors.map(anchorRow) })
+    return blocks
+  }
   return chosen.analysis?.tables || []
+}
+
+const rounded = (value, digits = 1) => (value == null ? null : Number(value.toFixed(digits)))
+
+function legRow(leg) {
+  return {
+    leg: leg.title,
+    events: leg.event_count,
+    anchors: leg.anchor_count,
+    status: leg.status.replaceAll('_', ' '),
+    implied_speed_mm_s: leg.speed_range_mm_s?.map((v) => rounded(v, 2)) || null,
+    measured_speed_mm_s: rounded(leg.measured_speed_mm_s, 2),
+  }
+}
+
+function placementRow(p) {
+  return {
+    event: p.event_id,
+    kind: p.kind,
+    start: p.start_text,
+    end: p.end_text,
+    leg: p.leg + 1,
+    status: p.status,
+    station_mm: rounded(p.station_mm),
+    from_mm: rounded(p.station_start_mm),
+    to_mm: rounded(p.station_end_mm),
+    width_mm: rounded(p.width_mm),
+    crosses_gap: p.crosses_gap,
+  }
+}
+
+function anchorRow(anchor) {
+  return {
+    event: anchor.event_id,
+    from_mm: rounded(anchor.station_start_mm),
+    to_mm: rounded(anchor.station_end_mm),
+  }
 }
 
 function renderTables() {
@@ -497,6 +562,7 @@ async function locate(data) {
 
 async function pick(coords) {
   if (!chosen.extent) return
+  if (chosen.section === 'alignment') return alignmentPick(coords)
   const token = ++chosen.probeRequest
   const viewToken = chosen.request
   markPoint(coords)
@@ -822,6 +888,294 @@ async function exportRuler() {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
+function alignmentDraft() {
+  if (!chosen.draft) {
+    const saved = chosen.alignment?.alignment
+    chosen.draft = {
+      log_text: saved?.log_text || '',
+      certainty_mm: saved?.certainty_mm ?? 25,
+      anchors: (saved?.anchors || []).map((anchor) => ({ ...anchor })),
+    }
+  }
+  return chosen.draft
+}
+
+function renderAlignment(body) {
+  const saved = chosen.alignment?.alignment || null
+  const report = chosen.alignment?.report || null
+  if (report) {
+    const counts = report.status_counts
+    body.append(title('Alignment summary'), keyValues({
+      records: report.event_count,
+      clock_legs: report.leg_count,
+      rollbacks: report.rollback_count,
+      anchors: report.anchor_count,
+      certainty_band_mm: report.certainty_mm,
+      confident: counts.confident || 0,
+      ambiguous: counts.ambiguous || 0,
+      unplaced: counts.unplaced || 0,
+      outside_capture: counts.outside || 0,
+    }))
+    for (const boundary of report.boundaries) {
+      const tone = boundary.status === 'inconsistent' ? 'result-callout problem' : 'result-callout'
+      body.append(element('p', boundary.detail, tone))
+    }
+    if (report.gaps.length) {
+      body.append(copy(`${report.gaps.length} real acquisition gap(s) stay visible on the image. Bands crossing a gap are flagged in the placements table.`))
+    }
+    if (chosen.alignmentHit) renderAlignmentHit(body)
+  }
+  renderAlignmentEditor(body, saved)
+}
+
+function renderAlignmentHit(body) {
+  const hit = chosen.alignmentHit
+  const events = chosen.alignment.alignment?.events || []
+  const placements = chosen.alignment.report.placements
+  const byId = new Map(events.map((event) => [event.id, event]))
+  body.append(title(`Log records at ${format(hit.station_mm)} mm`))
+  if (!hit.event_ids.length) {
+    body.append(copy('No log record covers this station.'))
+    return
+  }
+  for (const id of hit.event_ids) {
+    const event = byId.get(id)
+    const placement = placements.find((p) => p.event_id === id)
+    if (!event) continue
+    const card = element('div', null, 'hit-card')
+    card.append(element('strong', `${event.id} · ${event.kind}`))
+    card.append(keyValues({
+      start: event.start_text,
+      end: event.end_text,
+      note: event.note || '—',
+      status: placement?.status,
+      band_mm: placement?.station_start_mm != null
+        ? `${format(placement.station_start_mm)} – ${format(placement.station_end_mm)}`
+        : '—',
+      crosses_gap: placement?.crosses_gap,
+    }))
+    body.append(card)
+  }
+}
+
+function renderAlignmentEditor(body, saved) {
+  if (!chosen.alignment) {
+    body.append(copy('Loading alignment…'))
+    return
+  }
+  const draft = alignmentDraft()
+  body.append(title('Operation log'))
+  body.append(copy('One record per line: kind, start, end[, note]. Times may be HH:MM:SS, YYYY-MM-DD HH:MM:SS, or plain seconds. Record order is the true order; a record that starts before its predecessor marks a clock rollback. Lines starting with # are ignored. Re-parse after editing the log: anchors follow the parsed record ids.'))
+  const logArea = element('textarea', null, 'log-text')
+  logArea.value = draft.log_text
+  logArea.rows = 7
+  logArea.maxLength = 30000
+  logArea.placeholder = 'pressure test, 08:12:04, 08:12:40, first test'
+  logArea.addEventListener('input', () => { draft.log_text = logArea.value })
+  body.append(logArea)
+  const tools = element('div', null, 'field-row')
+  tools.append(button('Parse log', guarded(async () => {
+    chosen.parsed = await send(base() + '/alignment/parse', { log_text: draft.log_text })
+    renderInspector()
+  }), 'small'))
+  body.append(tools)
+  if (chosen.parsed) renderParsed(body)
+  body.append(title('Anchors'))
+  body.append(copy('Tie known operations to their narrow station ranges on the image. Each clock leg needs at least two anchors before its other records can be placed.'))
+  const events = chosen.parsed?.events || saved?.events || []
+  draft.anchors.forEach((anchor, index) => body.append(anchorCard(anchor, index, events)))
+  body.append(button('Add anchor', () => {
+    if (!events.length) {
+      notify('Parse the log before adding anchors.', true)
+      return
+    }
+    chosen.draft.anchors.push({ event_id: events[0].id, station_start_mm: null, station_end_mm: null })
+    renderInspector()
+  }, 'small'))
+  const certainty = field('Certainty band (mm)', 'certainty_mm', draft.certainty_mm, { type: 'number', required: true })
+  certainty.querySelector('input').addEventListener('input', (event) => {
+    draft.certainty_mm = Number(event.target.value)
+  })
+  body.append(certainty)
+  const actions = element('div', null, 'field-row')
+  const save = element('button', 'Save alignment', 'button primary small')
+  save.type = 'button'
+  save.addEventListener('click', guarded(async () => {
+    const payload = {
+      log_text: draft.log_text,
+      anchors: draft.anchors,
+      certainty_mm: draft.certainty_mm,
+      revision: revision(),
+    }
+    const result = await send(base() + '/alignment', payload, 'PUT')
+    chosen.capture.state = result.state
+    chosen.draft = null
+    chosen.parsed = null
+    chosen.pickTarget = null
+    chosen.alignmentHit = null
+    await renderView()
+    notify(result.warnings?.length ? result.warnings[0] : 'Alignment saved.', Boolean(result.warnings?.length))
+  }))
+  actions.append(save)
+  if (saved) {
+    actions.append(button('Remove alignment', guarded(async () => {
+      if (!window.confirm('Remove the saved log alignment from this capture?')) return
+      const result = await send(base() + '/alignment', { revision: revision() }, 'DELETE')
+      chosen.capture.state = result.state
+      chosen.draft = null
+      chosen.parsed = null
+      chosen.pickTarget = null
+      chosen.alignmentHit = null
+      await renderView()
+      notify('Alignment removed.')
+    }), 'small danger'))
+  }
+  body.append(actions)
+}
+
+function renderParsed(body) {
+  const parsed = chosen.parsed
+  for (const warning of parsed.warnings) {
+    body.append(element('p', warning, 'result-callout problem'))
+  }
+  const legs = parsed.rollback_count + 1
+  body.append(copy(`${parsed.events.length} records · ${parsed.rollback_count ? `${parsed.rollback_count} rollback(s) → ${legs} clock legs` : 'single clock leg'}`))
+  const rows = parsed.events.map((event) => ({
+    id: event.id,
+    kind: event.kind,
+    start: event.start_text,
+    end: event.end_text,
+    leg: event.leg + 1,
+  }))
+  body.append(table(rows, null, 'table-scroll mini-table'))
+}
+
+function anchorCard(anchor, index, events) {
+  const picking = chosen.pickTarget?.index === index
+  const card = element('div', null, 'anchor-card' + (picking ? ' picking' : ''))
+  const select = element('select')
+  for (const event of events) {
+    const leg = event.leg != null ? ` · leg ${event.leg + 1}` : ''
+    const option = element('option', `${event.id} · ${event.kind} · ${event.start_text}–${event.end_text}${leg}`)
+    option.value = event.id
+    select.append(option)
+  }
+  select.value = anchor.event_id
+  select.addEventListener('change', () => { anchor.event_id = select.value })
+  card.append(select)
+  const range = element('div', null, 'field-grid')
+  const start = field('Start station (mm)', `a${index}_start`, anchor.station_start_mm, { type: 'number' })
+  const end = field('End station (mm)', `a${index}_end`, anchor.station_end_mm, { type: 'number' })
+  start.querySelector('input').addEventListener('input', (event) => {
+    anchor.station_start_mm = Number(event.target.value)
+  })
+  end.querySelector('input').addEventListener('input', (event) => {
+    anchor.station_end_mm = Number(event.target.value)
+  })
+  range.append(start, end)
+  card.append(range)
+  const tools = element('div', null, 'field-row')
+  tools.append(
+    button('Pick start', () => {
+      chosen.pickTarget = { index, key: 'station_start_mm' }
+      renderInspector()
+      notify('Click the image to set the anchor start station.')
+    }, 'small'),
+    button('Pick end', () => {
+      chosen.pickTarget = { index, key: 'station_end_mm' }
+      renderInspector()
+      notify('Click the image to set the anchor end station.')
+    }, 'small'),
+    button('Remove', () => {
+      chosen.draft.anchors.splice(index, 1)
+      chosen.pickTarget = null
+      renderInspector()
+    }, 'small danger'),
+  )
+  card.append(tools)
+  return card
+}
+
+function alignmentPick(coords) {
+  const extent = chosen.extent
+  const station = extent.y_from + coords.y * (extent.y_to - extent.y_from)
+  markPoint(coords)
+  if (chosen.pickTarget) {
+    const anchor = chosen.draft?.anchors[chosen.pickTarget.index]
+    if (anchor) {
+      anchor[chosen.pickTarget.key] = Math.round(station * 10) / 10
+      const end = chosen.pickTarget.key === 'station_end_mm'
+      notify(`Anchor ${end ? 'end' : 'start'} set to ${format(anchor[chosen.pickTarget.key])} mm.`)
+    }
+    chosen.pickTarget = null
+    renderInspector()
+    return
+  }
+  const report = chosen.alignment?.report
+  if (!report) return
+  const hits = report.placements.filter((p) =>
+    p.station_start_mm != null && station >= p.station_start_mm && station <= p.station_end_mm)
+  chosen.alignmentHit = { station_mm: station, event_ids: hits.map((p) => p.event_id) }
+  renderInspector()
+  redrawAlignment()
+}
+
+function redrawAlignment() {
+  const canvas = $('#ruler-layer')
+  if (chosen.section !== 'alignment') return
+  const width = canvas.clientWidth
+  const height = canvas.clientHeight
+  const ratio = window.devicePixelRatio || 1
+  canvas.width = Math.round(width * ratio)
+  canvas.height = Math.round(height * ratio)
+  const extent = chosen.extent
+  const report = chosen.alignment?.report
+  if (!extent || !report) return
+  const brush = canvas.getContext('2d')
+  brush.scale(ratio, ratio)
+  const span = extent.y_to - extent.y_from || 1
+  const py = (station) => (station - extent.y_from) / span * height
+  const band = (from, to, fill, stroke, dash = []) => {
+    const y0 = py(from)
+    const y1 = py(to)
+    if (Math.min(y0, y1) > height || Math.max(y0, y1) < 0) return
+    const top = Math.max(0, Math.min(y0, y1))
+    const size = Math.max(2, Math.min(Math.max(y0, y1), height) - top)
+    brush.fillStyle = fill
+    brush.fillRect(0, top, width, size)
+    brush.strokeStyle = stroke
+    brush.lineWidth = 1.2
+    brush.setLineDash(dash)
+    brush.strokeRect(-1, top, width + 2, size)
+    brush.setLineDash([])
+  }
+  for (const gap of report.gaps) {
+    band(gap.from_mm, gap.to_mm, 'rgba(86, 99, 168, 0.5)', 'rgba(150, 162, 220, 0.8)')
+  }
+  for (const anchor of chosen.alignment.alignment?.anchors || []) {
+    band(anchor.station_start_mm, anchor.station_end_mm, 'rgba(136, 174, 242, 0.30)', '#88aef2')
+  }
+  for (const p of report.placements) {
+    if (p.station_start_mm == null) continue
+    if (p.status === 'confident') {
+      band(p.station_start_mm, p.station_end_mm, 'rgba(114, 229, 204, 0.22)', '#72e5cc')
+    } else if (p.status === 'ambiguous') {
+      band(p.station_start_mm, p.station_end_mm, 'rgba(240, 177, 111, 0.20)', '#f0b16f', [6, 4])
+    }
+  }
+  if (chosen.alignmentHit) {
+    brush.strokeStyle = '#f6d46d'
+    brush.lineWidth = 2
+    for (const id of chosen.alignmentHit.event_ids) {
+      const p = report.placements.find((item) => item.event_id === id)
+      if (!p || p.station_start_mm == null) continue
+      const top = Math.max(0, Math.min(py(p.station_start_mm), py(p.station_end_mm)))
+      const size = Math.max(2, Math.abs(py(p.station_end_mm) - py(p.station_start_mm)))
+      brush.strokeRect(1, top, width - 2, size)
+    }
+  }
+}
+
 async function inspectSnapshot(id) {
   const result = await json(base() + '/snapshots/' + id)
   if (chosen.section !== 'snapshots') return
@@ -884,7 +1238,10 @@ function wireEvents() {
   $('#raster').addEventListener('error', () => {
     if ($('#raster').getAttribute('src')) showErrorImage(new Error('Could not load this view.'))
   })
-  window.addEventListener('resize', redrawRuler)
+  window.addEventListener('resize', () => {
+    redrawRuler()
+    redrawAlignment()
+  })
   $('#library-button').addEventListener('click', () => $('#library-dialog').showModal())
   document.querySelectorAll('[data-close]').forEach((control) => {
     control.addEventListener('click', () => document.getElementById(control.dataset.close).close())

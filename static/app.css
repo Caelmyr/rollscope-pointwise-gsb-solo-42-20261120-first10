@@ -173,6 +173,9 @@ h2 { font-size: 17px; font-weight: 665; letter-spacing: -.025em; }
 .swatch.edge, .swatch.bright { background: var(--mint); }
 .swatch.dark { background: var(--amber); }
 .swatch.splice { background: #d09af2; }
+.swatch.anchor { background: var(--blue); }
+.swatch.confident { background: var(--mint); }
+.swatch.ambiguous { background: repeating-linear-gradient(135deg, #f0b16f 0 3px, #5c4a33 3px 6px); }
 .view-footer { display: flex; flex-wrap: wrap; gap: 4px 14px; justify-content: space-between; align-items: center; color: var(--quiet); font-size: 11px; padding: 9px 15px; margin-top: auto; }
 
 .inspector { overflow: hidden; display: flex; flex-direction: column; max-height: calc(clamp(486px, 51vh, 745px) + 151px); }
@@ -207,6 +210,19 @@ h2 { font-size: 17px; font-weight: 665; letter-spacing: -.025em; }
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 9px; }
 .field-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .result-callout { background: #1d303a; border: 1px solid #31535c; color: #c1e4e4; padding: 8px 10px; border-radius: 7px; margin: 8px 0 12px; font-size: 12px; }
+.result-callout.problem { background: #3d2934; border-color: #a85b62; color: #ffe0da; }
+.log-text {
+  width: 100%; min-height: 110px; resize: vertical; margin-bottom: 9px;
+  font: 12px/1.5 var(--mono); border: 1px solid var(--stroke); border-radius: 7px;
+  background: #111a29; color: var(--text); padding: 8px 10px;
+}
+.anchor-card { display: grid; gap: 7px; border: 1px solid var(--stroke-faint); border-radius: 7px; padding: 8px; margin: 0 0 8px; }
+.anchor-card.picking { border-color: var(--mint); }
+.hit-card { border: 1px solid var(--stroke-faint); border-radius: 7px; padding: 8px 10px; margin-bottom: 8px; }
+.hit-card strong { font-size: 12px; }
+.align-icon i:nth-child(1) { height: 3px; }
+.align-icon i:nth-child(2) { height: 9px; }
+.align-icon i:nth-child(3) { height: 6px; }
 .review-list { display: grid; gap: 7px; margin: 8px 0 12px; }
 .review-item { width: 100%; text-align: left; background: #182437; border: 1px solid var(--stroke-faint); padding: 8px 9px; border-radius: 6px; font-size: 12px; }
 .review-item:hover, .review-item.active { border-color: #416f72; background: #213642; }

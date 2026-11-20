@@ -238,6 +238,29 @@ def notes(ref):
     return {"state": capture_service().set_notes(ref, revision, data["notes"])}
 
 
+@api.get("/captures/<ref>/alignment")
+def alignment(ref):
+    return capture_service().alignment(ref, revision_argument())
+
+
+@api.post("/captures/<ref>/alignment/parse")
+def alignment_parse(ref):
+    data = body(("log_text",))
+    return capture_service().preview_alignment(ref, data)
+
+
+@api.put("/captures/<ref>/alignment")
+def alignment_save(ref):
+    data, revision = body(("log_text", "anchors", "certainty_mm"), with_revision=True)
+    return capture_service().save_alignment(ref, revision, data)
+
+
+@api.delete("/captures/<ref>/alignment")
+def alignment_clear(ref):
+    _, revision = body((), with_revision=True)
+    return capture_service().clear_alignment(ref, revision)
+
+
 @api.post("/captures/<ref>/windows")
 def create_window(ref):
     data, revision = body(("label", "note", "status", "region"), with_revision=True)

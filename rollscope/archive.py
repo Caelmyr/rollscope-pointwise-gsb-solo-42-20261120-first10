@@ -9,9 +9,16 @@ from zipfile import BadZipFile, ZipFile
 
 from .analysis import SECTION_TITLES
 from .capture_codec import MAX_BUNDLE_BYTES, capture_bytes, capture_hash, read_capture
-from .domain import UserInputError, clean_text, exact_keys, expect_object, whole_number
+from .domain import UserInputError, clean_text, exact_keys, expect_object, reject_unknown, whole_number
 from .evidence import EVIDENCE_FORMAT, Evidence
-from .records import MAX_SNAPSHOTS, MAX_WINDOWS, CaptureState, InspectionSnapshot, ReviewWindow
+from .records import (
+    MAX_SNAPSHOTS,
+    MAX_WINDOWS,
+    CaptureState,
+    InspectionSnapshot,
+    LogAlignment,
+    ReviewWindow,
+)
 from .settings import AnalysisSettings
 
 
@@ -151,7 +158,12 @@ def timestamp(value):
 
 def restore_state(payload, capture):
     data = json_document(payload, "Project state")
-    exact_keys(data, ("revision", "notes", "settings", "windows", "updated_at"), "Project state")
+    required = ("revision", "notes", "settings", "windows", "updated_at")
+    reject_unknown(data, (*required, "alignment"), "Project state")
+    missing = set(required) - set(data)
+    if missing:
+        names = ", ".join(sorted(missing))
+        raise UserInputError(f"Project state is missing required fields: {names}.")
     windows = data["windows"]
     if not isinstance(windows, list) or len(windows) > MAX_WINDOWS:
         raise UserInputError("The archive exceeds the review window limit.")
@@ -164,12 +176,17 @@ def restore_state(payload, capture):
             raise UserInputError("The archive contains duplicate review window IDs.")
         ids.add(ref)
         records.append(ReviewWindow.from_request(entry, capture, ref))
+    alignment_data = data.get("alignment")
+    alignment = (
+        LogAlignment.stored(alignment_data, capture) if alignment_data is not None else None
+    )
     return CaptureState(
         whole_number(data["revision"], "Archived revision", 0, 2**31 - 1),
         AnalysisSettings.parse(data["settings"]),
         tuple(records),
         clean_text(data["notes"], "Archived capture notes", 4000, True),
         timestamp(data["updated_at"]),
+        alignment,
     )
 
 
