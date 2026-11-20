@@ -1,15 +1,32 @@
 import numpy as np
 
 from .calibration import safe_value
+from .domain import UserInputError
 from .grid import Support
 from .lineage import detailed_lineage
 from .presentation import extrema_indices
-from .raster import ACQUISITION_LAYERS, Layer, position_mapping
+from .raster import (
+    ACQUISITION_LAYERS,
+    WINDOW_LAYERS,
+    Layer,
+    position_mapping,
+    smear_window,
+)
+from .smear import SmearState, STATE_MEANING
 
 
 def point_measurement(context, spec, x, y):
     mapping = position_mapping(context, spec)
     row, column = mapping.cell(x, y)
+    if spec.layer == Layer.SMEAR:
+        result = smear_point(context, spec, row, column)
+        result.update(
+            layer=spec.layer.value,
+            column=column,
+            transverse_mm=float(context.capture.transverse[column]),
+            coordinate=mapping.as_dict(),
+        )
+        return result
     result = {
         "layer": spec.layer.value,
         "column": column,
@@ -20,6 +37,72 @@ def point_measurement(context, spec, x, y):
     if spec.layer in ACQUISITION_LAYERS:
         return result | acquisition_point(context, row, column)
     return result | station_point(context, row, column, spec.layer)
+
+
+def smear_point(context, spec, row, column):
+    if spec.window is None:
+        raise UserInputError("Motion-smear compensation applies to a saved review window.")
+    report = context.smear_window(spec.window)
+    local = row - report.first_row
+    first_column = int(
+        np.searchsorted(context.grid.transverse, report.transverse[0], side="left")
+    )
+    cell = column - first_column
+    state = SmearState(int(report.state[local]))
+    return {
+        "row": row,
+        "station_mm": float(report.stations[local]),
+        "coverage": state.name.lower(),
+        "coverage_meaning": STATE_MEANING[state],
+        "valid": bool(np.isfinite(report.restored[local, cell])),
+        "reflectance": safe_value(report.restored[local, cell]),
+        "recorded_reflectance": safe_value(report.original[local, cell]),
+        "displayed": "recorded" if spec.recorded else "restored",
+        "blur_rows": safe_value(report.blur_rows[local]),
+        "exposure_distance_mm": safe_value(report.blur_mm[local]),
+        "speed_mm_s": safe_value(report.speed_mm_s[local]),
+        "exposure_ms": safe_value(report.exposure_ms[local]),
+        "lineage": smear_lineage(context, report, local, cell),
+    }
+
+
+def smear_lineage(context, report, local, column):
+    """Recorded source lines behind the restored cell, plus their exposure data."""
+    row = report.first_row + local
+    grid = context.grid
+    support = Support(grid.plan.support[row])
+    records = grid.provenance(row, column)
+    sources = []
+    profile = report.profile
+    for group in records["sources"]:
+        for line in range(group["first_line"], group["first_line"] + group["line_count"]):
+            sources.append(
+                {
+                    "source_line": int(line),
+                    "encoder_tick": int(context.capture.ticks[line]),
+                    "capture_time_s": float(context.capture.seconds[line]),
+                    "sensor_code": int(context.capture.raw[line, column]),
+                    "reflectance": safe_value(context.calibrated.values[line, column]),
+                    "group_weight": float(group["weight"]),
+                    "speed_known": bool(profile.known[line]),
+                    "speed_mm_s": safe_value(profile.speed_mm_s[line]),
+                    "exposure_ms": safe_value(profile.exposure_ms[line]),
+                    "exposure_distance_mm": safe_value(
+                        profile.exposure_distance_mm()[line]
+                    ),
+                }
+            )
+    return {
+        "kind": "motion_smear",
+        "row": int(row),
+        "station_mm": float(grid.stations[row]),
+        "grid_coverage": support.name.lower(),
+        "recorded_reflectance": safe_value(report.original[local, column]),
+        "restored_reflectance": safe_value(report.restored[local, column]),
+        "state": SmearState(int(report.state[local])).name.lower(),
+        "line_count": len(sources),
+        "segments": [{"kind": "recorded_source_lines", "rows": sources}],
+    }
 
 
 def acquisition_point(context, row, column):
@@ -74,6 +157,11 @@ def cross_section(context, spec, y, points):
     if spec.layer in ACQUISITION_LAYERS:
         values, validity = acquisition_profile(context, row, cols, spec.layer)
         coverage = "acquisition"
+    elif spec.layer == Layer.SMEAR:
+        report = smear_window(context, spec)
+        values = report.restored[row - report.first_row, cols - mapping.columns.start]
+        validity = np.isfinite(values)
+        coverage = SmearState(int(report.state[row - report.first_row])).name.lower()
     else:
         values, validity = station_profile(context, row, cols, spec.layer)
         coverage = Support(context.grid.plan.support[row]).name.lower()

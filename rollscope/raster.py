@@ -5,9 +5,10 @@ from enum import Enum
 import numpy as np
 from PIL import Image, ImageDraw
 
-from .domain import DISPLAY_HEIGHT, DISPLAY_WIDTH, StationWindow
+from .domain import DISPLAY_HEIGHT, DISPLAY_WIDTH, StationWindow, UserInputError
 from .grid import Support, index_near
 from .numerics import true_runs
+from .smear import SmearState
 
 
 class Layer(str, Enum):
@@ -18,6 +19,7 @@ class Layer(str, Enum):
     EDGES = "edges"
     SPOTS = "spots"
     STREAKS = "streaks"
+    SMEAR = "smear"
     MARKS = "marks"
     SPLICES = "splices"
     TEXTURE = "texture"
@@ -25,6 +27,7 @@ class Layer(str, Enum):
 
 
 ACQUISITION_LAYERS = {Layer.SENSOR, Layer.FLAT}
+WINDOW_LAYERS = {Layer.SMEAR}
 CATEGORY_STYLES = {
     "edge": (85, 244, 212),
     "dark": (255, 169, 88),
@@ -32,6 +35,7 @@ CATEGORY_STYLES = {
     "mark": (239, 182, 92),
     "splice": (219, 137, 255),
     "texture": (138, 240, 205),
+    "held": (240, 122, 128),
 }
 
 
@@ -42,6 +46,7 @@ class RasterSpec:
     max_height: int = DISPLAY_HEIGHT
     show_overlays: bool = True
     window: StationWindow | None = None
+    recorded: bool = False
 
 
 @dataclass(frozen=True)
@@ -172,6 +177,45 @@ def position_mapping(context, spec):
     return RasterMapping.make(grid.shape, spec.max_width, spec.max_height, rows, columns)
 
 
+def smear_window(context, spec):
+    if spec.layer in ACQUISITION_LAYERS:
+        return None
+    if spec.layer in WINDOW_LAYERS:
+        if spec.window is None:
+            raise UserInputError(
+                "Motion-smear compensation applies to a saved review window. "
+                "Choose a window before opening this view."
+            )
+        return context.smear_window(spec.window)
+    return None
+
+
+def smear_layer(context, spec, indices):
+    report = smear_window(context, spec)
+    rows, columns = np.ravel(indices[0]), np.ravel(indices[1])
+    local_rows = rows - report.first_row
+    first_column = int(np.searchsorted(context.grid.transverse, report.transverse[0], side="left"))
+    local_columns = columns - first_column
+    values = report.restored[np.ix_(local_rows, local_columns)]
+    gaps = report.state[local_rows] == SmearState.GAP
+    if spec.recorded:
+        recorded = report.original[np.ix_(local_rows, local_columns)]
+        valid = np.isfinite(recorded) & report.original_valid[
+            np.ix_(local_rows, local_columns)
+        ]
+        pixels = gray_palette(recorded, 0.02, 0.83)
+        color_unobserved(pixels, valid, gaps)
+        return pixels
+    restored = report.state[local_rows] == SmearState.RESTORED
+    pixels = gray_palette(values, 0.02, 0.83)
+    # Mark whole rows that carry no restoration, not just the cells that happen
+    # to be non-finite, so a withheld or unknown row cannot read as recovered detail.
+    blocked = ~restored | ~np.isfinite(values).all(axis=1)
+    unknown = np.repeat(blocked[:, None], pixels.shape[1], axis=1)
+    color_unobserved(pixels, ~unknown, gaps)
+    return pixels
+
+
 def raw_layer(context, indices, calibrated):
     if calibrated:
         surface = context.calibrated
@@ -213,11 +257,13 @@ def preview_image(context, spec):
     indices = np.ix_(rows, columns)
     if spec.layer in ACQUISITION_LAYERS:
         pixels = raw_layer(context, indices, calibrated=spec.layer == Layer.FLAT)
+    elif spec.layer in WINDOW_LAYERS:
+        pixels = smear_layer(context, spec, indices)
     else:
         pixels = grid_layer(context, indices, rows, spec.layer)
     image = Image.fromarray(pixels)
     if spec.show_overlays and spec.layer not in ACQUISITION_LAYERS:
-        ReviewDrawing(image, mapping, context).render(spec.layer)
+        ReviewDrawing(image, mapping, context, spec).render(spec.layer)
     return image, mapping
 
 
@@ -228,9 +274,10 @@ def png_bytes(image):
 
 
 class ReviewDrawing:
-    def __init__(self, image, mapping, context):
+    def __init__(self, image, mapping, context, spec=None):
         self.mapping = mapping
         self.context = context
+        self.spec = spec
         self.draw = ImageDraw.Draw(image)
 
     def render(self, layer):
@@ -238,6 +285,7 @@ class ReviewDrawing:
             Layer.EDGES: self.edges,
             Layer.SPOTS: self.spots,
             Layer.STREAKS: self.streaks,
+            Layer.SMEAR: self.smear,
             Layer.MARKS: self.marks,
             Layer.SPLICES: self.splices,
             Layer.TEXTURE: self.texture,
@@ -323,6 +371,18 @@ class ReviewDrawing:
                 CATEGORY_STYLES["splice"],
                 padding=1,
             )
+
+    def smear(self):
+        report = smear_window(self.context, self.spec)
+        if report is None or self.spec.recorded:
+            return
+        grid = self.context.grid
+        for start, finish in true_runs(report.state != SmearState.RESTORED):
+            first_row = report.first_row + start
+            last_row = report.first_row + finish - 1
+            left = float(report.transverse[0])
+            right = float(report.transverse[-1])
+            self.strip_box(first_row, last_row, left, right, CATEGORY_STYLES["held"])
 
     def texture(self):
         active = self.context.texture.tiles

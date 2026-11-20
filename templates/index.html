@@ -52,6 +52,7 @@
           <button type="button" data-section="edges"><span class="nav-icon edge-icon"><i></i><i></i></span>Strip geometry</button>
           <button type="button" data-section="spots"><span class="nav-icon dot-icon"><i></i><i></i><i></i></span>Surface spots</button>
           <button type="button" data-section="streaks"><span class="nav-icon streak-icon"><i></i><i></i><i></i></span>Streaks</button>
+          <button type="button" data-section="smear"><span class="nav-icon streak-icon"><i></i><i></i><i></i></span>Motion smear</button>
           <button type="button" data-section="marks"><span class="nav-icon mark-icon"><i></i><i></i><i></i></span>Repeat pitch</button>
           <button type="button" data-section="splices"><span class="nav-icon join-icon"><i></i><i></i></span>Transverse joins</button>
           <button type="button" data-section="texture"><span class="nav-icon texture-icon"><i></i><i></i><i></i></span>Texture</button>
@@ -73,6 +74,10 @@
           </div>
           <div class="toolbar">
             <select id="window-picker" aria-label="Viewport window"><option value="">Full capture</option></select>
+            <label class="toggle">
+              <input type="checkbox" id="smear-compare" hidden>
+              <span id="smear-compare-label" hidden>Recorded</span>
+            </label>
             <label class="toggle">
               <input type="checkbox" id="overlay-toggle" checked>
               <span>Overlays</span>

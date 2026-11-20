@@ -5,6 +5,7 @@ from threading import RLock
 from .acquisition import measure_acquisition
 from .calibration import calibrate
 from .coverage import inspect_coverage
+from .domain import StationWindow
 from .edges import track_edges
 from .grid import build_grid
 from .illumination import measure_illumination
@@ -12,6 +13,16 @@ from .marks import inspect_marks
 from .motion import infer_motion, motion_values
 from .presentation import extrema_indices
 from .reference_passes import report_reference_passes
+from .smear import (
+    SmearState,
+    STATE_MEANING,
+    estimate_transport,
+    profile_series,
+    restore_window,
+    station_kernels,
+    transport_summary,
+    unknown_line_table,
+)
 from .splices import inspect_splices
 from .spots import detect_spots
 from .streaks import measure_streaks
@@ -26,6 +37,7 @@ SECTION_TITLES = {
     "edges": "Strip geometry",
     "spots": "Surface spots",
     "streaks": "Longitudinal streaks",
+    "smear": "Motion smear",
     "marks": "Repeat pitch",
     "splices": "Transverse joins",
     "texture": "Surface texture",
@@ -37,6 +49,8 @@ class AnalysisContext:
     def __init__(self, capture, settings):
         self.capture = capture
         self.settings = settings
+        self.smear_cache = {}
+        self.smear_lock = RLock()
 
     @cached_property
     def calibrated(self):
@@ -61,6 +75,24 @@ class AnalysisContext:
     @cached_property
     def spots(self):
         return detect_spots(self.grid, self.edges, self.settings.spots)
+
+    @cached_property
+    def transport(self):
+        return estimate_transport(self.capture, self.acquisition, self.settings.smear)
+
+    @cached_property
+    def station_kernels(self):
+        return station_kernels(self.capture, self.grid, self.transport)
+
+    def smear_window(self, window):
+        key = window.as_dict()
+        key = tuple(sorted(key.items()))
+        with self.smear_lock:
+            if key not in self.smear_cache:
+                self.smear_cache[key] = restore_window(self, window)
+            if len(self.smear_cache) > 8:
+                self.smear_cache.pop(next(iter(self.smear_cache)))
+            return self.smear_cache[key]
 
     @cached_property
     def streaks(self):
@@ -130,6 +162,7 @@ class AnalysisPresenter:
             "edges": self.edges,
             "spots": self.spots,
             "streaks": self.streaks,
+            "smear": self.smear,
             "marks": self.marks,
             "splices": self.splices,
             "texture": self.texture,
@@ -241,6 +274,27 @@ class AnalysisPresenter:
         report = self.context.streaks
         table = result_table("streaks", "Sustained streaks", report.table())
         return report.summary(), [table], []
+
+    def smear(self):
+        context = self.context
+        profile = transport_summary(context)
+        profile["states"] = {
+            state.name.lower(): STATE_MEANING[state] for state in SmearState
+        }
+        series = profile_series(context, self.max_points)
+        charts = [
+            plot("Exposure distance", series, "station_mm", "exposure_mm", "mm"),
+            plot("Transport speed", series, "station_mm", "speed_mm_s", "mm/s"),
+            plot("Blur in station rows", series, "station_mm", "blur_rows", "rows"),
+        ]
+        tables = [
+            result_table(
+                "unknown_motion",
+                "Acquisition spans without an exposure estimate",
+                unknown_line_table(context),
+            ),
+        ]
+        return profile, tables, charts
 
     def marks(self):
         report = self.context.marks

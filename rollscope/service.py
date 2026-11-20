@@ -15,6 +15,7 @@ from .probe import cross_section, point_measurement, view_extent
 from .raster import ACQUISITION_LAYERS, RasterSpec, png_bytes, preview_image
 from .ruler import Ruler, evaluate_ruler
 from .records import InspectionSnapshot, ReviewWindow, identifier, utc_now
+from .smear import run_table, state_table, summary as smear_summary
 from .window_review import review_window
 
 
@@ -140,32 +141,55 @@ class CaptureService:
         window = record.state.get_window(window_id)
         return window_package(record, context, window)
 
-    def render_spec(self, record, layer, overlays, window_id):
+    def render_spec(self, record, layer, overlays, window_id, recorded=False):
         if window_id is None or layer in ACQUISITION_LAYERS:
             return RasterSpec(layer, show_overlays=overlays)
         window = record.state.get_window(window_id)
-        return RasterSpec(layer, show_overlays=overlays, window=window.region)
+        return RasterSpec(
+            layer, show_overlays=overlays, window=window.region, recorded=recorded
+        )
 
-    def raster(self, record_id, expected, layer, overlays, window_id):
+    def smear_windows(self, ref, expected, window_id=None):
+        record, context = self.configured(ref, expected)
+        if window_id is not None:
+            window = record.state.get_window(window_id)
+            reports = [window]
+        else:
+            reports = list(record.state.windows)
+        payload = []
+        for window in reports:
+            report = context.smear_window(window.region)
+            payload.append(
+                {
+                    "window": window.as_dict(),
+                    "summary": smear_summary(report, context),
+                    "states": report.state_counts(),
+                    "runs": run_table(report),
+                    "rows": state_table(report),
+                }
+            )
+        return {"windows": payload, "revision": record.state.revision}
+
+    def raster(self, record_id, expected, layer, overlays, window_id, recorded=False):
         record, context = self.configured(record_id, expected)
-        spec = self.render_spec(record, layer, overlays, window_id)
+        spec = self.render_spec(record, layer, overlays, window_id, recorded)
         picture, mapping = preview_image(context, spec)
         return png_bytes(picture), mapping.as_dict(), record.state.revision
 
-    def view(self, record_id, expected, layer, window_id):
+    def view(self, record_id, expected, layer, window_id, recorded=False):
         record, context = self.configured(record_id, expected)
-        spec = self.render_spec(record, layer, True, window_id)
+        spec = self.render_spec(record, layer, True, window_id, recorded)
         return view_extent(context, spec) | {"revision": record.state.revision}
 
-    def probe(self, record_id, expected, layer, window_id, x, y):
+    def probe(self, record_id, expected, layer, window_id, recorded, x, y):
         record, context = self.configured(record_id, expected)
-        spec = self.render_spec(record, layer, True, window_id)
+        spec = self.render_spec(record, layer, True, window_id, recorded)
         result = point_measurement(context, spec, x, y)
         return result | {"revision": record.state.revision}
 
-    def profile(self, record_id, expected, layer, window_id, y, points):
+    def profile(self, record_id, expected, layer, window_id, recorded, y, points):
         record, context = self.configured(record_id, expected)
-        spec = self.render_spec(record, layer, True, window_id)
+        spec = self.render_spec(record, layer, True, window_id, recorded)
         result = cross_section(context, spec, y, points)
         return result | {"revision": record.state.revision}
 

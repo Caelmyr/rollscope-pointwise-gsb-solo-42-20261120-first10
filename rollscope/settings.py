@@ -183,6 +183,33 @@ class SpliceSettings:
         )
 
 
+@dataclass(frozen=True)
+class SmearSettings:
+    exposure_ms: float | None = None
+    maximum_blur_rows: float = 12
+    iterations: int = 16
+    maximum_overshoot: float = 0.18
+
+    @classmethod
+    def parse(cls, data):
+        value = overlay(cls(), data, "Motion smear settings")
+        exposure = value["exposure_ms"]
+        return cls(
+            exposure_ms=(
+                None
+                if exposure is None
+                else finite_number(exposure, "Line exposure", 0.001, 100_000)
+            ),
+            maximum_blur_rows=finite_number(
+                value["maximum_blur_rows"], "Maximum blur (station rows)", 0.5, 200
+            ),
+            iterations=whole_number(value["iterations"], "Deconvolution iterations", 1, 200),
+            maximum_overshoot=finite_number(
+                value["maximum_overshoot"], "Maximum reflectance overshoot", 0, 5
+            ),
+        )
+
+
 SETTINGS_TYPES = {
     "calibration": CalibrationSettings,
     "grid": GridSettings,
@@ -192,6 +219,7 @@ SETTINGS_TYPES = {
     "marks": MarkSettings,
     "texture": TextureSettings,
     "splices": SpliceSettings,
+    "smear": SmearSettings,
 }
 
 
@@ -205,6 +233,7 @@ class AnalysisSettings:
     marks: MarkSettings
     texture: TextureSettings
     splices: SpliceSettings
+    smear: SmearSettings
 
     @classmethod
     def parse(cls, data):

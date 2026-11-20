@@ -86,6 +86,10 @@ def window_argument():
     return request.args.get("window")
 
 
+def recorded_argument():
+    return request.args.get("recorded", "0") == "1"
+
+
 def validate_section(section):
     if not isinstance(section, str) or section not in SECTION_TITLES:
         raise MissingRecord("That analysis section does not exist.")
@@ -175,7 +179,12 @@ def analysis_export(ref, section):
 def raster(ref):
     overlay = request.args.get("overlay", "1") != "0"
     content, mapping, revision = capture_service().raster(
-        ref, revision_argument(), layer_argument(), overlay, window_argument()
+        ref,
+        revision_argument(),
+        layer_argument(),
+        overlay,
+        window_argument(),
+        recorded_argument(),
     )
     response = Response(content, mimetype="image/png")
     response.headers["X-Review-Revision"] = str(revision)
@@ -186,7 +195,14 @@ def raster(ref):
 
 @api.get("/captures/<ref>/view")
 def view(ref):
-    return capture_service().view(ref, revision_argument(), layer_argument(), window_argument())
+    return capture_service().view(
+        ref, revision_argument(), layer_argument(), window_argument(), recorded_argument()
+    )
+
+
+@api.get("/captures/<ref>/smear")
+def smear_windows(ref):
+    return capture_service().smear_windows(ref, revision_argument(), window_argument())
 
 
 @api.get("/captures/<ref>/probe")
@@ -196,6 +212,7 @@ def probe(ref):
         revision_argument(),
         layer_argument(),
         window_argument(),
+        recorded_argument(),
         decimal_argument("x", 0, 1),
         decimal_argument("y", 0, 1),
     )
@@ -208,6 +225,7 @@ def profile(ref):
         revision_argument(),
         layer_argument(),
         window_argument(),
+        recorded_argument(),
         decimal_argument("y", 0, 1),
         points_argument(),
     )

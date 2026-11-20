@@ -8,6 +8,7 @@ const VIEW = {
   edges: ['Strip geometry', 'Edge traces and measured material width', 'edges', 'edges'],
   spots: ['Surface spots', 'Candidate footprints against the local material background', 'spots', 'spots'],
   streaks: ['Streaks', 'Longitudinal tracks with sustained local contrast', 'streaks', 'streaks'],
+  smear: ['Motion smear', 'Exposure-integrated rows restored along the roll for one saved window', 'smear', 'smear'],
   marks: ['Repeat pitch', 'Dark repeat marks and measured station spacing', 'marks', 'marks'],
   splices: ['Transverse joins', 'Same-sign contrast across the material width', 'splices', 'splices'],
   texture: ['Texture', 'Stripe direction estimated inside supported material tiles', 'texture', 'texture'],
@@ -63,6 +64,12 @@ const SETTINGS = {
     ['local_scale_mm', 'Local scale (mm)'],
     ['minimum_spacing_mm', 'Minimum spacing (mm)'],
   ],
+  smear: [
+    ['exposure_ms', 'Line exposure (ms; blank uses the recorded clock)'],
+    ['maximum_blur_rows', 'Maximum blur (station rows)'],
+    ['iterations', 'Deconvolution iterations', '1'],
+    ['maximum_overshoot', 'Maximum reflectance overshoot'],
+  ],
 }
 
 const LEGEND = {
@@ -73,6 +80,7 @@ const LEGEND = {
   edges: [['edge', 'Tracked edge'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   spots: [['dark', 'Darker contrast'], ['bright', 'Brighter contrast'], ['gap', 'Encoder gap'], ['bad', 'Excluded area']],
   streaks: [['dark', 'Dark streak'], ['bright', 'Bright streak'], ['gap', 'Encoder gap'], ['bad', 'Excluded area']],
+  smear: [['reflectance', 'Restored'], ['gap', 'Capture gap'], ['bad', 'Not restored']],
   marks: [['dark', 'Detected mark'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   splices: [['splice', 'Join candidate'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   texture: [['edge', 'Stripe direction'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
@@ -104,11 +112,14 @@ const chosen = {
   request: 0,
   load: 0,
   probeRequest: 0,
+  recorded: false,
+  smear: null,
 }
 
 let toastTimer
 const regularView = () => !['windows', 'ruler', 'snapshots'].includes(chosen.section)
 const layer = () => VIEW[chosen.section][2]
+const needsWindow = () => layer() === 'smear'
 const revision = () => chosen.capture.state.revision
 const base = () => '/api/captures/' + chosen.capture.id
 
@@ -163,6 +174,7 @@ function anchorURL(path, params = {}) {
 function viewParams(extra = {}) {
   const parameters = { layer: layer(), revision: revision(), ...extra }
   if (chosen.window) parameters.window = chosen.window
+  if (needsWindow() && chosen.recorded) parameters.recorded = 1
   return parameters
 }
 
@@ -241,6 +253,13 @@ function updateCaptureChrome() {
   const windows = chosen.capture.state.windows.map((item) => [item.id, item.label])
   if (!windows.some(([id]) => id === chosen.window)) chosen.window = ''
   replaceOptions($('#window-picker'), [['', 'Full capture'], ...windows], chosen.window)
+  if (needsWindow() && !chosen.window && windows.length) chosen.window = windows[0][0]
+  if (!needsWindow()) chosen.recorded = false
+  const compare = $('#smear-compare')
+  compare.hidden = !needsWindow()
+  compare.checked = chosen.recorded
+  $('#smear-compare-label').hidden = !needsWindow()
+  $('#window-picker').disabled = needsWindow() && !windows.length
 }
 
 function showErrorImage(error) {
@@ -255,9 +274,13 @@ async function renderView() {
   const [title, description] = VIEW[chosen.section]
   const raw = layer() === 'sensor' || layer() === 'flat'
   $('#marker').hidden = true
-  $('#window-picker').disabled = raw || chosen.section === 'ruler'
+  $('#window-picker').disabled = raw || chosen.section === 'ruler' || (needsWindow() && !chosen.capture.state.windows.length)
   $('#view-title').textContent = title
-  $('#view-subtitle').textContent = description
+  $('#view-subtitle').textContent = needsWindow()
+    ? chosen.recorded
+      ? 'Recorded exposure-integrated rows, aligned to the restored view'
+      : description
+    : description
   $('#axis-y-caption').textContent = raw ? 'ACQUISITION LINE' : 'STATION · MM'
   $('#snapshot-button').disabled = !regularView()
   for (const nav of $('#navigation').querySelectorAll('button')) {
@@ -277,14 +300,22 @@ async function renderView() {
   if (regularView()) {
     sectionLink.href = anchorURL(base() + `/analysis/${chosen.section}/export`, { revision: revision() })
   }
+  if (needsWindow() && !chosen.capture.state.windows.length) {
+    showErrorImage(new Error('Save a review window to compensate its motion smear.'))
+    return
+  }
   const parameters = viewParams({ overlay: $('#overlay-toggle').checked ? 1 : 0 })
   const viewURL = anchorURL(base() + '/view', parameters)
   const imageURL = anchorURL(base() + '/preview.png', parameters)
   const analysisURL = regularView()
     ? anchorURL(base() + '/analysis/' + chosen.section, { revision: revision() })
     : null
+  const windowURL = needsWindow()
+    ? anchorURL(base() + '/smear', { revision: revision(), window: chosen.window })
+    : null
   chosen.extent = null
   chosen.analysis = null
+  chosen.smear = null
   chosen.probe = null
   chosen.profile = null
   renderInspector()
@@ -293,10 +324,12 @@ async function renderView() {
     const result = await Promise.all([
       json(viewURL),
       analysisURL ? json(analysisURL) : Promise.resolve(null),
+      windowURL ? json(windowURL) : Promise.resolve(null),
     ])
     if (token !== chosen.request) return
     chosen.extent = result[0]
     chosen.analysis = result[1]
+    chosen.smear = result[2]?.windows?.find((item) => item.window.id === chosen.window) || null
   } catch (error) {
     if (token === chosen.request) showErrorImage(error)
     throw error
@@ -328,6 +361,7 @@ function paintTicks() {
 function activeSection(section) {
   chosen.section = section
   chosen.tab = 'analysis'
+  chosen.recorded = false
   if (section === 'ruler') chosen.window = ''
   if (layer() === 'sensor' || layer() === 'flat') chosen.window = ''
   updateCaptureChrome()
@@ -361,12 +395,49 @@ function renderInspector() {
   if (chosen.section === 'windows') return renderWindows(body)
   if (chosen.section === 'ruler') return renderRuler(body)
   if (chosen.section === 'snapshots') return renderSnapshots(body)
+  if (chosen.section === 'smear') return renderSmear(body)
   if (!chosen.analysis) {
     body.append(copy('Loading measurements…'))
     return
   }
   body.append(title(chosen.analysis.name), keyValues(chosen.analysis.summary))
   for (const plot of chosen.analysis.charts) body.append(chart(plot))
+}
+
+function renderSmear(body) {
+  if (!chosen.smear) {
+    body.append(copy(
+      chosen.capture.state.windows.length
+        ? 'Open a motion-smear window to see its exposure and restoration evidence.'
+        : 'Save a review window, then open this view to try along-roll compensation.'
+    ))
+    return
+  }
+  const report = chosen.smear
+  body.append(title('Window compensation'), keyValues(report.summary))
+  body.append(copy(
+    'Recorded values and their source lines stay available in the Probe tab. ' +
+    'Hatched rows were not restored and are excluded from the comparison.'
+  ))
+  if (report.rows.length) {
+    body.append(title('Rows without a restoration'))
+    body.append(table(report.rows, null, 'table-scroll mini-table'))
+  }
+  const series = report.runs.length
+    ? report.runs.map((run) => ({
+      station_mm: run.first_row,
+      rows: run.rows,
+      blur_min: run.blur_rows_min,
+      blur_max: run.blur_rows_max,
+      overshoot: run.overshoot,
+    }))
+    : []
+  if (series.length) {
+    body.append(chart({
+      title: 'Restored runs', x: 'station_mm', y: ['blur_min', 'blur_max'], unit: 'rows',
+      records: series,
+    }))
+  }
 }
 
 function tableBlocks() {
@@ -873,6 +944,10 @@ function wireEvents() {
   }))
   $('#window-picker').addEventListener('change', guarded((event) => {
     chosen.window = event.target.value
+    return renderView()
+  }))
+  $('#smear-compare').addEventListener('change', guarded((event) => {
+    chosen.recorded = event.target.checked
     return renderView()
   }))
   $('#overlay-toggle').addEventListener('change', guarded(renderView))

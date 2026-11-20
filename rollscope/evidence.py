@@ -12,6 +12,7 @@ from .capture_codec import canonical_json
 from .domain import UserInputError
 from .inspection_sheet import window_sheet
 from .raster import Layer, RasterSpec, png_bytes, preview_image
+from .smear import run_table, state_table, summary as smear_summary
 from .window_review import WindowCells, review_window, row_provenance, source_rows
 
 
@@ -25,6 +26,7 @@ REPORT_KEYS = {
     "edges": Layer.EDGES,
     "spots": Layer.SPOTS,
     "streaks": Layer.STREAKS,
+    "smear": Layer.STATION,
     "marks": Layer.MARKS,
     "splices": Layer.SPLICES,
     "texture": Layer.TEXTURE,
@@ -163,6 +165,15 @@ def window_package(record, context, window):
     evidence.table("transverse-profile.csv", report["profiles"]["transverse_bands"])
     evidence.json("raster-mapping.json", raster_meta)
     evidence.add("review-sheet.png", png_bytes(window_sheet(record, context, window)))
+    evidence.json("motion-smear.json", smear_report(context, window))
+    evidence.raster(
+        "motion-smear.png", context, RasterSpec(Layer.SMEAR, window=window.region)
+    )
+    evidence.raster(
+        "motion-recorded.png",
+        context,
+        RasterSpec(Layer.SMEAR, window=window.region, recorded=True),
+    )
     return evidence.make(
         {
             "capture_sha256": record.sha256,
@@ -172,6 +183,15 @@ def window_package(record, context, window):
             "geometry": record.capture.metadata.geometry.as_dict(),
         }
     )
+
+
+def smear_report(context, window):
+    report = context.smear_window(window.region)
+    return smear_summary(report, context) | {
+        "states": report.state_counts(),
+        "runs": run_table(report),
+        "rows": state_table(report),
+    }
 
 
 def export_result_tables(evidence, result):
