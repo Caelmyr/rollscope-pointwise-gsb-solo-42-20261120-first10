@@ -1,4 +1,4 @@
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -14,10 +14,13 @@ from .domain import (
     reject_unknown,
 )
 from .settings import AnalysisSettings
+from .trim import TrimObjective
 
 
 MAX_WINDOWS = 40
 MAX_SNAPSHOTS = 40
+MAX_TRIM_PLANS = 8
+MAX_TRIM_SPOTS = 3
 
 
 def utc_now():
@@ -26,6 +29,102 @@ def utc_now():
 
 def identifier():
     return uuid4().hex[:16]
+
+
+@dataclass(frozen=True)
+class TrimPlanRecord:
+    id: str
+    label: str
+    objective: str
+    margin_mm: float
+    minimum_length_mm: float
+    retain_start_mm: float | None
+    retain_end_mm: float | None
+    spot_ids: tuple
+    plan: dict
+    spot_settings: dict
+    capture_sha: str
+    source_revision: int
+    created_at: str
+
+    @classmethod
+    def create(cls, data, plan, settings, capture_sha, revision):
+        record = expect_object(data, "Trim confirmation")
+        exact_keys(
+            record,
+            ("label", "objective", "margin_mm", "minimum_length_mm",
+             "retain_start_mm", "retain_end_mm", "spot_ids"),
+            "Trim confirmation",
+        )
+        spot_ids = record["spot_ids"]
+        if not isinstance(spot_ids, list) or not all(type(item) is int for item in spot_ids):
+            raise UserInputError("Spot selections must be whole-number spot identifiers.")
+        if not 1 <= len(spot_ids) <= MAX_TRIM_SPOTS:
+            raise UserInputError(
+                f"A confirmed trim must remove between 1 and {MAX_TRIM_SPOTS} spots."
+            )
+        if len(set(spot_ids)) != len(spot_ids):
+            raise UserInputError("Each spot can only be selected once.")
+        objective = read_enum(TrimObjective, record["objective"], "Trim objective").value
+        return cls(
+            identifier(),
+            clean_text(record["label"], "Trim plan name", 75),
+            objective,
+            float(record["margin_mm"]),
+            float(record["minimum_length_mm"]),
+            record["retain_start_mm"],
+            record["retain_end_mm"],
+            tuple(spot_ids),
+            plan,
+            asdict(settings.spots),
+            capture_sha,
+            revision,
+            utc_now(),
+        )
+
+    @classmethod
+    def stored(cls, data):
+        return cls(
+            data["id"],
+            data["label"],
+            data["objective"],
+            float(data["margin_mm"]),
+            float(data["minimum_length_mm"]),
+            data["retain_start_mm"],
+            data["retain_end_mm"],
+            tuple(data["spot_ids"]),
+            data["plan"],
+            data["spot_settings"],
+            data["capture_sha"],
+            int(data["source_revision"]),
+            data["created_at"],
+        )
+
+    def request_payload(self):
+        return {
+            "margin_mm": self.margin_mm,
+            "minimum_length_mm": self.minimum_length_mm,
+            "retain_start_mm": self.retain_start_mm,
+            "retain_end_mm": self.retain_end_mm,
+            "spot_ids": list(self.spot_ids),
+        }
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "label": self.label,
+            "objective": self.objective,
+            "margin_mm": self.margin_mm,
+            "minimum_length_mm": self.minimum_length_mm,
+            "retain_start_mm": self.retain_start_mm,
+            "retain_end_mm": self.retain_end_mm,
+            "spot_ids": list(self.spot_ids),
+            "plan": self.plan,
+            "spot_settings": self.spot_settings,
+            "capture_sha": self.capture_sha,
+            "source_revision": self.source_revision,
+            "created_at": self.created_at,
+        }
 
 
 @dataclass(frozen=True)
@@ -73,12 +172,13 @@ class CaptureState:
     revision: int
     settings: AnalysisSettings
     windows: tuple
+    trim_plans: tuple
     notes: str
     updated_at: str
 
     @classmethod
     def create(cls, timestamp):
-        return cls(0, AnalysisSettings.defaults(), (), "", timestamp)
+        return cls(0, AnalysisSettings.defaults(), (), (), "", timestamp)
 
     @classmethod
     def from_dict(cls, data):
@@ -86,6 +186,7 @@ class CaptureState:
             data["revision"],
             AnalysisSettings.parse(data["settings"]),
             tuple(ReviewWindow.stored(item) for item in data["windows"]),
+            tuple(TrimPlanRecord.stored(item) for item in data.get("trim_plans", ())),
             data["notes"],
             data["updated_at"],
         )
@@ -95,6 +196,7 @@ class CaptureState:
             "revision": self.revision,
             "settings": self.settings.as_dict(),
             "windows": [window.as_dict() for window in self.windows],
+            "trim_plans": [plan.as_dict() for plan in self.trim_plans],
             "notes": self.notes,
             "updated_at": self.updated_at,
         }
@@ -131,6 +233,25 @@ class CaptureState:
     def remove_window(self, ref):
         self.get_window(ref)
         return replace(self, windows=tuple(item for item in self.windows if item.id != ref))
+
+    def get_trim_plan(self, ref):
+        for plan in self.trim_plans:
+            if plan.id == ref:
+                return plan
+        raise MissingRecord("That confirmed trim plan no longer exists.")
+
+    def add_trim_plan(self, plan):
+        if len(self.trim_plans) >= MAX_TRIM_PLANS:
+            raise UserInputError(
+                f"Saving another trim plan would exceed the limit of {MAX_TRIM_PLANS}."
+            )
+        return replace(self, trim_plans=self.trim_plans + (plan,))
+
+    def remove_trim_plan(self, ref):
+        self.get_trim_plan(ref)
+        return replace(
+            self, trim_plans=tuple(item for item in self.trim_plans if item.id != ref)
+        )
 
     def next_revision(self, timestamp):
         return replace(self, revision=self.revision + 1, updated_at=timestamp)

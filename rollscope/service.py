@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from dataclasses import replace
+from dataclasses import asdict, replace
 from threading import RLock
 
 from . import __version__
@@ -14,7 +14,9 @@ from .measure_export import export_ruler
 from .probe import cross_section, point_measurement, view_extent
 from .raster import ACQUISITION_LAYERS, RasterSpec, png_bytes, preview_image
 from .ruler import Ruler, evaluate_ruler
-from .records import InspectionSnapshot, ReviewWindow, identifier, utc_now
+from .records import InspectionSnapshot, ReviewWindow, TrimPlanRecord, identifier, utc_now
+from .trim import TrimObjective, TrimPlanner, TrimRequest, evaluate_trim
+from .trim_export import export_trim_plan, trim_view
 from .window_review import review_window
 
 
@@ -90,6 +92,7 @@ class CaptureService:
             "state": record.state.as_dict(),
             "quick_readings": status,
             "snapshots": self.repository.list_snapshots(ref),
+            "trim_plans": [plan.as_dict() for plan in record.state.trim_plans],
         }
 
     def configured(self, ref, expected):
@@ -140,15 +143,17 @@ class CaptureService:
         window = record.state.get_window(window_id)
         return window_package(record, context, window)
 
-    def render_spec(self, record, layer, overlays, window_id):
+    def render_spec(self, record, layer, overlays, window_id, trim_plan=None):
         if window_id is None or layer in ACQUISITION_LAYERS:
-            return RasterSpec(layer, show_overlays=overlays)
+            return RasterSpec(layer, show_overlays=overlays, trim_plan=trim_plan)
         window = record.state.get_window(window_id)
-        return RasterSpec(layer, show_overlays=overlays, window=window.region)
+        return RasterSpec(
+            layer, show_overlays=overlays, window=window.region, trim_plan=trim_plan
+        )
 
-    def raster(self, record_id, expected, layer, overlays, window_id):
+    def raster(self, record_id, expected, layer, overlays, window_id, trim_plan=None):
         record, context = self.configured(record_id, expected)
-        spec = self.render_spec(record, layer, overlays, window_id)
+        spec = self.render_spec(record, layer, overlays, window_id, trim_plan)
         picture, mapping = preview_image(context, spec)
         return png_bytes(picture), mapping.as_dict(), record.state.revision
 
@@ -217,3 +222,138 @@ class CaptureService:
     def export_analysis(self, ref, expected, section):
         record, context = self.configured(ref, expected)
         return current_package(record, context, section)
+
+    def trim_options(self, ref, expected, payload):
+        record, context = self.configured(ref, expected)
+        result = evaluate_trim(context, payload)
+        return result | {"revision": record.state.revision}
+
+    def trim_preview(self, ref, expected, payload):
+        record, context = self.configured(ref, expected)
+        objective = read_trim_objective(payload)
+        request = parse_trim_request(payload)
+        planner = TrimPlanner(context)
+        plan = planner.plan(objective, request)
+        picture, mapping = trim_view(context, plan.as_dict())
+        return (
+            png_bytes(picture),
+            mapping.as_dict(),
+            record.state.revision,
+            plan,
+        )
+
+    def confirm_trim(self, ref, expected, payload):
+        record, context = self.configured(ref, expected)
+        objective = read_trim_objective(payload)
+        request = parse_trim_request(payload)
+        if not request.spot_ids:
+            raise UserInputError("Select at least one spot before confirming a trim plan.")
+        planner = TrimPlanner(context)
+        plan = planner.plan(objective, request)
+        if not plan.feasible:
+            messages = "; ".join(item["message"] for item in plan.conflicts)
+            raise UserInputError("This trim plan cannot be confirmed: " + messages)
+        saved = TrimPlanRecord.create(
+            payload, plan.as_dict(), context.settings, record.sha256, expected
+        )
+        state = self.repository.mutate(ref, expected, lambda current: current.add_trim_plan(saved))
+        return {
+            "state": state.as_dict(),
+            "trim_plan": saved.as_dict(),
+        }
+
+    def trim_plan(self, ref, trim_id):
+        record = self.read(ref)
+        saved = record.state.get_trim_plan(trim_id)
+        context = self.context_for(record)
+        current = self.recompute_saved_trim(context, saved)
+        settings_match = asdict(context.settings.spots) == saved.spot_settings
+        return {
+            "saved": saved.as_dict(),
+            "current": current,
+            "settings_match": settings_match,
+            "revision": record.state.revision,
+        }
+
+    def trim_plan_image(self, ref, trim_id, use_saved):
+        record = self.read(ref)
+        saved = record.state.get_trim_plan(trim_id)
+        context = self.context_for(record)
+        if use_saved:
+            plan = saved.plan
+        else:
+            plan = self.recompute_saved_trim(context, saved)
+        picture, mapping = trim_view(context, plan)
+        return png_bytes(picture), mapping.as_dict(), record.state.revision
+
+    def recompute_saved_trim(self, context, saved):
+        try:
+            return TrimPlanner(context).plan(
+                TrimObjective(saved.objective),
+                TrimRequest(
+                    saved.margin_mm,
+                    saved.minimum_length_mm,
+                    saved.retain_start_mm,
+                    saved.retain_end_mm,
+                    saved.spot_ids,
+                ),
+            ).as_dict()
+        except UserInputError as error:
+            return {
+                "objective": saved.objective,
+                "feasible": False,
+                "conflicts": [{"code": "recompute_failed", "message": str(error)}],
+                "warnings": [],
+                "selected_spots": [],
+                "cut_regions": [],
+                "segments": [],
+                "retain": (
+                    None
+                    if saved.retain_start_mm is None
+                    else {
+                        "start_mm": saved.retain_start_mm,
+                        "end_mm": saved.retain_end_mm,
+                    }
+                ),
+                "cut_count": 0,
+                "removed_length_mm": 0.0,
+                "retained_length_mm": 0.0,
+                "longest_segment_mm": 0.0,
+                "shippable_length_mm": 0.0,
+                "shippable_segment_count": 0,
+                "total_length_mm": 0.0,
+            }
+
+    def delete_trim_plan(self, ref, expected, trim_id):
+        state = self.repository.mutate(
+            ref, expected, lambda current: current.remove_trim_plan(trim_id)
+        )
+        return state.as_dict()
+
+    def export_trim(self, ref, trim_id):
+        record = self.read(ref)
+        saved = record.state.get_trim_plan(trim_id)
+        context = self.context_for(record)
+        return export_trim_plan(record, context, saved)
+
+
+def read_trim_objective(payload):
+    from .domain import read_enum
+
+    data = payload if isinstance(payload, dict) else {}
+    return read_enum(TrimObjective, data.get("objective", TrimObjective.LONGEST.value), "Trim objective")
+
+
+def parse_trim_request(payload):
+    return TrimRequest.parse(
+        {
+            key: payload[key]
+            for key in (
+                "margin_mm",
+                "minimum_length_mm",
+                "retain_start_mm",
+                "retain_end_mm",
+                "spot_ids",
+            )
+        }
+    )

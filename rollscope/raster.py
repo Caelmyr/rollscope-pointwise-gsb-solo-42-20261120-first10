@@ -22,6 +22,7 @@ class Layer(str, Enum):
     SPLICES = "splices"
     TEXTURE = "texture"
     ILLUMINATION = "illumination"
+    TRIM = "trim"
 
 
 ACQUISITION_LAYERS = {Layer.SENSOR, Layer.FLAT}
@@ -42,6 +43,7 @@ class RasterSpec:
     max_height: int = DISPLAY_HEIGHT
     show_overlays: bool = True
     window: StationWindow | None = None
+    trim_plan: object | None = None
 
 
 @dataclass(frozen=True)
@@ -218,6 +220,8 @@ def preview_image(context, spec):
     image = Image.fromarray(pixels)
     if spec.show_overlays and spec.layer not in ACQUISITION_LAYERS:
         ReviewDrawing(image, mapping, context).render(spec.layer)
+    if spec.trim_plan is not None:
+        TrimDrawing(image, mapping, context, spec.trim_plan).render()
     return image, mapping
 
 
@@ -345,3 +349,118 @@ class ReviewDrawing:
                 fill=CATEGORY_STYLES["texture"],
                 width=1,
             )
+
+
+TRIM_CUT = (255, 214, 92)
+TRIM_CUTOUT = (214, 88, 84)
+TRIM_RETAIN = (114, 229, 204)
+TRIM_SCrap = (120, 130, 145)
+
+
+class TrimDrawing:
+    """Cut lines, cut-out band, remnant segments and retained sample on a station image."""
+
+    def __init__(self, image, mapping, context, plan):
+        self.image = image
+        self.mapping = mapping
+        self.context = context
+        self.grid = context.grid
+        self.plan = plan
+        self.draw = ImageDraw.Draw(image, "RGBA")
+
+    def row_y(self, row):
+        return self.mapping.pixel(row, self.mapping.columns.start)[1]
+
+    def transverse_x(self, station_mm):
+        return self.mapping.pixel(self.mapping.rows.start, 0)[0]
+
+    def band(self, row_start, row_stop, fill, outline=None):
+        top = self.row_y(max(row_start, self.mapping.rows.start))
+        bottom = self.row_y(min(row_stop, self.mapping.rows.stop - 1))
+        left = 0
+        right = self.image.width - 1
+        self.draw.rectangle((left, top, right, bottom), fill=fill)
+        if outline is not None:
+            self.draw.line((left, top, right, top), fill=outline, width=2)
+            self.draw.line((left, bottom, right, bottom), fill=outline, width=2)
+
+    def cut_line(self, row, label, position):
+        if not self.mapping.rows.start <= row <= self.mapping.rows.stop - 1:
+            return
+        y = self.row_y(row)
+        self.draw.line((0, y, self.image.width - 1, y), fill=TRIM_CUT, width=3)
+        text_y = y + 4 if position == "below" else y - 16
+        if text_y < 2:
+            text_y = y + 4
+        if text_y > self.image.height - 14:
+            text_y = y - 16
+        text_y = max(2, min(self.image.height - 14, text_y))
+        self.draw.rectangle((2, text_y - 2, 122, text_y + 12), fill=(20, 26, 38, 220))
+        self.draw.text((6, text_y), label, fill=TRIM_CUT)
+
+    def render(self):
+        plan = self.plan
+        for region in plan.get("cut_regions", []):
+            self.band(
+                region["start_row"],
+                region["end_row"],
+                TRIM_CUTOUT + (78,),
+                outline=TRIM_CUTOUT,
+            )
+            self.cut_line(region["start_row"], f"CUT {region['start_mm']:.1f} mm", "above")
+            self.cut_line(region["end_row"], f"CUT {region['end_mm']:.1f} mm", "below")
+            mid_row = (region["start_row"] + region["end_row"]) // 2
+            if self.mapping.rows.start <= mid_row <= self.mapping.rows.stop - 1:
+                mid_y = self.row_y(mid_row)
+                tag = "CUT AWAY"
+                self.draw.rectangle((2, mid_y - 8, 96, mid_y + 8), fill=(90, 30, 30, 220))
+                self.draw.text((6, mid_y - 6), tag, fill=TRIM_CUTOUT)
+        retain = plan.get("retain")
+        if retain is not None:
+            grid = self.grid
+            y0 = index_near(grid.stations, retain["start_mm"])
+            y1 = index_near(grid.stations, retain["end_mm"])
+            if y1 >= self.mapping.rows.start and y0 < self.mapping.rows.stop:
+                top = self.row_y(max(y0, self.mapping.rows.start))
+                bottom = self.row_y(min(y1, self.mapping.rows.stop - 1))
+                self.draw.rectangle(
+                    (2, top, self.image.width - 3, bottom),
+                    outline=TRIM_RETAIN,
+                    width=2,
+                )
+                self.draw.rectangle((2, top + 2, 132, top + 16), fill=(20, 26, 38, 215))
+                self.draw.text((6, top + 3), "RETAINED SAMPLE", fill=TRIM_RETAIN)
+        for segment in plan.get("segments", []):
+            if segment["shippable"]:
+                continue
+            row_start = index_near(self.grid.stations, segment["start_mm"])
+            row_stop = index_near(self.grid.stations, segment["end_mm"])
+            if row_stop >= self.mapping.rows.start and row_start < self.mapping.rows.stop:
+                self.band(
+                    max(row_start, self.mapping.rows.start),
+                    min(row_stop, self.mapping.rows.stop - 1),
+                    TRIM_SCrap + (52,),
+                )
+        for segment in plan.get("segments", []):
+            row_start = index_near(self.grid.stations, segment["start_mm"])
+            row_stop = index_near(self.grid.stations, segment["end_mm"])
+            visible_start = max(row_start, self.mapping.rows.start)
+            visible_stop = min(row_stop, self.mapping.rows.stop - 1)
+            if visible_stop <= visible_start:
+                continue
+            mid_y = self.row_y((visible_start + visible_stop) // 2)
+            label = f"SEG {segment['segment']} · {segment['length_mm']:.0f} mm"
+            if not segment["shippable"]:
+                label += " · BELOW MIN"
+            color = TRIM_RETAIN if segment["shippable"] else TRIM_SCrap
+            box_width = max(150, 7 * len(label))
+            visible_height = self.row_y(visible_stop) - self.row_y(visible_start)
+            # Short or edge-cramped segments carry their tag on the free right side.
+            if visible_height < 44 or mid_y < 24 or mid_y > self.image.height - 20:
+                x_left = self.image.width - box_width - 4
+                mid_y = max(10, min(self.image.height - 12, mid_y))
+            else:
+                x_left = 2
+            self.draw.rectangle((x_left, mid_y - 8, x_left + box_width, mid_y + 9),
+                                fill=(20, 26, 38, 205))
+            self.draw.text((x_left + 4, mid_y - 6), label, fill=color)

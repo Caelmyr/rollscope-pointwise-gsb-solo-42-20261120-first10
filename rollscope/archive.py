@@ -11,7 +11,7 @@ from .analysis import SECTION_TITLES
 from .capture_codec import MAX_BUNDLE_BYTES, capture_bytes, capture_hash, read_capture
 from .domain import UserInputError, clean_text, exact_keys, expect_object, whole_number
 from .evidence import EVIDENCE_FORMAT, Evidence
-from .records import MAX_SNAPSHOTS, MAX_WINDOWS, CaptureState, InspectionSnapshot, ReviewWindow
+from .records import MAX_SNAPSHOTS, MAX_TRIM_PLANS, MAX_WINDOWS, CaptureState, InspectionSnapshot, ReviewWindow, TrimPlanRecord
 from .settings import AnalysisSettings
 
 
@@ -151,7 +151,11 @@ def timestamp(value):
 
 def restore_state(payload, capture):
     data = json_document(payload, "Project state")
-    exact_keys(data, ("revision", "notes", "settings", "windows", "updated_at"), "Project state")
+    exact_keys(
+        data,
+        ("revision", "notes", "settings", "windows", "trim_plans", "updated_at"),
+        "Project state",
+    )
     windows = data["windows"]
     if not isinstance(windows, list) or len(windows) > MAX_WINDOWS:
         raise UserInputError("The archive exceeds the review window limit.")
@@ -164,13 +168,35 @@ def restore_state(payload, capture):
             raise UserInputError("The archive contains duplicate review window IDs.")
         ids.add(ref)
         records.append(ReviewWindow.from_request(entry, capture, ref))
+    trim_plans = data["trim_plans"]
+    if not isinstance(trim_plans, list) or len(trim_plans) > MAX_TRIM_PLANS:
+        raise UserInputError("The archive exceeds the confirmed trim plan limit.")
+    plan_records = [restore_trim_plan(item) for item in trim_plans]
     return CaptureState(
         whole_number(data["revision"], "Archived revision", 0, 2**31 - 1),
         AnalysisSettings.parse(data["settings"]),
         tuple(records),
+        tuple(plan_records),
         clean_text(data["notes"], "Archived capture notes", 4000, True),
         timestamp(data["updated_at"]),
     )
+
+
+def restore_trim_plan(data):
+    entry = expect_object(data, "Archived trim plan")
+    expected = (
+        "id", "label", "objective", "margin_mm", "minimum_length_mm",
+        "retain_start_mm", "retain_end_mm", "spot_ids", "plan", "spot_settings",
+        "capture_sha", "source_revision", "created_at",
+    )
+    exact_keys(entry, expected, "Archived trim plan")
+    read_key(entry["id"])
+    clean_text(entry["label"], "Trim plan name", 75)
+    if entry["objective"] not in ("longest_segment", "max_retained"):
+        raise UserInputError("An archived trim plan has an unsupported objective.")
+    validate_datum(entry["plan"], 0)
+    validate_datum(entry["spot_settings"], 0)
+    return TrimPlanRecord.stored(entry)
 
 
 def restore_snapshots(payload, state, source_hash):

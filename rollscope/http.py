@@ -174,8 +174,13 @@ def analysis_export(ref, section):
 @api.get("/captures/<ref>/preview.png")
 def raster(ref):
     overlay = request.args.get("overlay", "1") != "0"
+    trim_plan = None
+    if layer_argument() == Layer.TRIM:
+        trim_id = request.args.get("trim_plan")
+        if trim_id:
+            trim_plan = capture_service().read(ref).state.get_trim_plan(trim_id).plan
     content, mapping, revision = capture_service().raster(
-        ref, revision_argument(), layer_argument(), overlay, window_argument()
+        ref, revision_argument(), layer_argument(), overlay, window_argument(), trim_plan
     )
     response = Response(content, mimetype="image/png")
     response.headers["X-Review-Revision"] = str(revision)
@@ -291,6 +296,93 @@ def export_snapshot(ref, snapshot_id):
     return stream_attachment(
         payload, f"rollscope-{ref}-snapshot-{snapshot_id}.zip", "application/zip"
     )
+
+
+@api.post("/captures/<ref>/trim/options")
+def trim_options(ref):
+    payload, revision = body(
+        (
+            "margin_mm",
+            "minimum_length_mm",
+            "retain_start_mm",
+            "retain_end_mm",
+            "spot_ids",
+        ),
+        with_revision=True,
+    )
+    return capture_service().trim_options(ref, revision, payload)
+
+
+@api.post("/captures/<ref>/trim/preview.png")
+def trim_preview(ref):
+    payload, revision = body(
+        (
+            "objective",
+            "margin_mm",
+            "minimum_length_mm",
+            "retain_start_mm",
+            "retain_end_mm",
+            "spot_ids",
+        ),
+        with_revision=True,
+    )
+    content, mapping, current_revision, plan = capture_service().trim_preview(
+        ref, revision, payload
+    )
+    response = Response(content, mimetype="image/png")
+    response.headers["X-Review-Revision"] = str(current_revision)
+    response.headers["X-Preview-Shape"] = f"{mapping['display_width']}x{mapping['display_height']}"
+    response.headers["X-Trim-Feasible"] = "1" if plan.feasible else "0"
+    response.cache_control.no_store = True
+    return response
+
+
+@api.post("/captures/<ref>/trim/plans")
+def confirm_trim(ref):
+    payload, revision = body(
+        (
+            "label",
+            "objective",
+            "margin_mm",
+            "minimum_length_mm",
+            "retain_start_mm",
+            "retain_end_mm",
+            "spot_ids",
+        ),
+        with_revision=True,
+    )
+    result = capture_service().confirm_trim(ref, revision, payload)
+    return result, 201
+
+
+@api.get("/captures/<ref>/trim/plans/<trim_id>")
+def trim_plan(ref, trim_id):
+    return capture_service().trim_plan(ref, trim_id)
+
+
+@api.get("/captures/<ref>/trim/plans/<trim_id>/preview.png")
+def trim_plan_preview(ref, trim_id):
+    use_saved = request.args.get("basis", "current") == "saved"
+    content, mapping, revision = capture_service().trim_plan_image(ref, trim_id, use_saved)
+    response = Response(content, mimetype="image/png")
+    response.headers["X-Review-Revision"] = str(revision)
+    response.headers["X-Preview-Shape"] = f"{mapping['display_width']}x{mapping['display_height']}"
+    response.cache_control.no_store = True
+    return response
+
+
+@api.get("/captures/<ref>/trim/plans/<trim_id>/export")
+def trim_plan_export(ref, trim_id):
+    payload = capture_service().export_trim(ref, trim_id)
+    return stream_attachment(
+        payload, f"rollscope-{ref}-trim-{trim_id}.zip", "application/zip"
+    )
+
+
+@api.delete("/captures/<ref>/trim/plans/<trim_id>")
+def trim_plan_delete(ref, trim_id):
+    _, revision = body((), with_revision=True)
+    return {"state": capture_service().delete_trim_plan(ref, revision, trim_id)}
 
 
 def api_error(error, status, **extra):

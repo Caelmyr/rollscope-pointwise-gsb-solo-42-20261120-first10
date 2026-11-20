@@ -13,6 +13,7 @@ const VIEW = {
   texture: ['Texture', 'Stripe direction estimated inside supported material tiles', 'texture', 'texture'],
   illumination: ['Reflectance trend', 'Across-strip and along-roll material reflectance', 'illumination'],
   windows: ['Review windows', 'Saved bounds in physical station coordinates', 'station'],
+  trim: ['Trim planning', 'Isolate up to three spots with two cuts and plan the remaining roll', 'trim'],
   ruler: ['Ruler', 'Measure across sheet, bad pixels and acquisition gaps', 'station'],
   snapshots: ['Saved reports', 'Previously recorded measurements and settings', 'station'],
 }
@@ -77,6 +78,7 @@ const LEGEND = {
   splices: [['splice', 'Join candidate'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   texture: [['edge', 'Stripe direction'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   illumination: [['reflectance', 'Reflectance'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
+  trim: [['trimcut', 'Cut line (sampled station)'], ['trimout', 'Cut-away isolation'], ['trimretain', 'Retained sample'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
 }
 
 const REGION = [
@@ -101,13 +103,16 @@ const chosen = {
   profile: null,
   rulerPoints: [],
   ruler: null,
+  trim: null,
+  trimBasis: 'longest_segment',
+  trimPlanId: '',
   request: 0,
   load: 0,
   probeRequest: 0,
 }
 
 let toastTimer
-const regularView = () => !['windows', 'ruler', 'snapshots'].includes(chosen.section)
+const regularView = () => !['windows', 'ruler', 'snapshots', 'trim'].includes(chosen.section)
 const layer = () => VIEW[chosen.section][2]
 const revision = () => chosen.capture.state.revision
 const base = () => '/api/captures/' + chosen.capture.id
@@ -163,6 +168,7 @@ function anchorURL(path, params = {}) {
 function viewParams(extra = {}) {
   const parameters = { layer: layer(), revision: revision(), ...extra }
   if (chosen.window) parameters.window = chosen.window
+  if (chosen.section === 'trim' && parameters.layer === 'trim') parameters.layer = 'spots'
   return parameters
 }
 
@@ -206,6 +212,7 @@ async function openCapture(id, reset = true) {
     Object.assign(chosen, {
       section: 'overview', tab: 'analysis', window: '', reviewed: '', snapshot: null,
       compare: null, probe: null, profile: null, ruler: null, rulerPoints: [],
+      trim: null, trimBasis: 'longest_segment', trimPlanId: '',
     })
   }
   $('#capture-picker').value = detail.id
@@ -255,7 +262,7 @@ async function renderView() {
   const [title, description] = VIEW[chosen.section]
   const raw = layer() === 'sensor' || layer() === 'flat'
   $('#marker').hidden = true
-  $('#window-picker').disabled = raw || chosen.section === 'ruler'
+  $('#window-picker').disabled = raw || ['ruler', 'trim'].includes(chosen.section)
   $('#view-title').textContent = title
   $('#view-subtitle').textContent = description
   $('#axis-y-caption').textContent = raw ? 'ACQUISITION LINE' : 'STATION · MM'
@@ -271,12 +278,15 @@ async function renderView() {
   }))
   $('#view-footnote').textContent = chosen.section === 'ruler'
     ? 'Select two points on the station image.'
-    : 'Select a pixel to inspect its source lines.'
+    : chosen.section === 'trim'
+      ? 'Cut lines snap to sampled stations. Confirm the plan to export it.'
+      : 'Select a pixel to inspect its source lines.'
   const sectionLink = $('#section-download')
   sectionLink.hidden = !regularView()
   if (regularView()) {
     sectionLink.href = anchorURL(base() + `/analysis/${chosen.section}/export`, { revision: revision() })
   }
+  if (chosen.section === 'trim') return renderTrimView(token)
   const parameters = viewParams({ overlay: $('#overlay-toggle').checked ? 1 : 0 })
   const viewURL = anchorURL(base() + '/view', parameters)
   const imageURL = anchorURL(base() + '/preview.png', parameters)
@@ -329,6 +339,11 @@ function activeSection(section) {
   chosen.section = section
   chosen.tab = 'analysis'
   if (section === 'ruler') chosen.window = ''
+  if (section === 'trim') {
+    chosen.window = ''
+    chosen.trimPlanId = ''
+    if (!chosen.trim) chosen.trim = { options: null, selected: [], opened: null, requestId: 0 }
+  }
   if (layer() === 'sensor' || layer() === 'flat') chosen.window = ''
   updateCaptureChrome()
   return renderView()
@@ -350,7 +365,9 @@ function copy(message) {
 function renderInspector() {
   for (const control of $('#detail-tabs').querySelectorAll('button')) {
     control.setAttribute('aria-current', control.dataset.tab === chosen.tab)
-    control.disabled = control.dataset.tab === 'settings' && !VIEW[chosen.section][3]
+    control.disabled =
+      (control.dataset.tab === 'settings' && !VIEW[chosen.section][3]) ||
+      (control.dataset.tab === 'probe' && chosen.section === 'trim')
   }
   const body = $('#detail-body')
   body.replaceChildren()
@@ -359,6 +376,7 @@ function renderInspector() {
   if (chosen.tab === 'probe') return renderProbe(body)
   if (chosen.tab === 'notes') return renderNotes(body)
   if (chosen.section === 'windows') return renderWindows(body)
+  if (chosen.section === 'trim') return renderTrim(body)
   if (chosen.section === 'ruler') return renderRuler(body)
   if (chosen.section === 'snapshots') return renderSnapshots(body)
   if (!chosen.analysis) {
@@ -370,6 +388,20 @@ function renderInspector() {
 }
 
 function tableBlocks() {
+  if (chosen.section === 'trim' && chosen.trim) {
+    const plan = activeTrimPlan()
+    if (!plan) return []
+    const spotRows = plan.selected_spots.map((spot) => ({
+      ...spot,
+      from_mm: spot.footprint_start_mm,
+      station_mm: spot.footprint_start_mm,
+    }))
+    return [
+      { title: 'Remnant segments', rows: plan.segments },
+      { title: 'Cut positions', rows: trimCutRows(plan) },
+      { title: 'Selected spot footprints', rows: spotRows },
+    ]
+  }
   if (chosen.section === 'windows' && chosen.windowReport) {
     return [
       { title: 'Unsampled intervals', rows: chosen.windowReport.gaps },
@@ -477,6 +509,10 @@ function markPoint(coords) {
 async function locate(data) {
   const extent = chosen.extent
   if (!extent) return
+  if (chosen.section === 'trim') {
+    if (typeof data.spot_id !== 'number') return
+    return locateTrimSpot(data.spot_id)
+  }
   const row = data.next_line ?? data.source_line ?? data.row
   const station = extent.y_unit === 'line'
     ? row
@@ -518,6 +554,14 @@ async function pick(coords) {
   chosen.profile = null
   chosen.probeY = coords.y
   if (chosen.section === 'windows' && chosen.tab === 'analysis') return
+  if (chosen.section === 'trim') {
+    if (typeof outcome.spot_id === 'number') {
+      await locateTrimSpot(outcome.spot_id)
+    } else {
+      notify('That cell is not part of a detected spot. Click inside a spot footprint to select it for removal.')
+    }
+    return
+  }
   selectTab('probe')
 }
 
@@ -820,6 +864,345 @@ async function exportRuler() {
   anchor.click()
   anchor.remove()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+// ---------- Trim planning ----------
+
+const TRIM_DEFAULTS = { margin_mm: 3, minimum_length_mm: 50, retain_start_mm: null, retain_end_mm: null }
+
+function trimFormState() {
+  const form = $('#trim-form')
+  if (!form) return { ...TRIM_DEFAULTS, spot_ids: [] }
+  const values = new FormData(form)
+  const number = (name) => {
+    const raw = values.get(name)
+    return raw === '' || raw === null ? null : Number(raw)
+  }
+  return {
+    margin_mm: Number(values.get('margin_mm')),
+    minimum_length_mm: Number(values.get('minimum_length_mm')),
+    retain_start_mm: number('retain_start_mm'),
+    retain_end_mm: number('retain_end_mm'),
+    spot_ids: chosen.trim?.selected || [],
+  }
+}
+
+function activeTrimPlan() {
+  if (!chosen.trim?.options) return null
+  if (chosen.trimPlanId) {
+    return chosen.trim.opened ? chosen.trim.opened.current : null
+  }
+  if (chosen.trim.selected.length && chosen.trim.options.requested) {
+    return chosen.trim.options.requested
+  }
+  return chosen.trim.options[chosen.trimBasis] || null
+}
+
+function trimCutRows(plan) {
+  const rows = []
+  for (const region of plan.cut_regions) {
+    rows.push({ role: 'start', ...region.start_cut, region_start_mm: region.start_mm, spot_ids: region.spot_ids })
+    rows.push({ role: 'end', ...region.end_cut, region_end_mm: region.end_mm, spot_ids: region.spot_ids })
+  }
+  return rows
+}
+
+async function renderTrimView(token) {
+  chosen.extent = null
+  chosen.analysis = null
+  chosen.probe = null
+  chosen.profile = null
+  if (!chosen.trim) {
+    chosen.trim = { options: null, selected: [], opened: null, requestId: 0 }
+  }
+  renderInspector()
+  renderTables()
+  const viewURL = anchorURL(base() + '/view', { layer: 'trim', revision: revision() })
+  const extent = await json(viewURL)
+  if (token !== chosen.request) return
+  chosen.extent = extent
+  $('#grid-size').textContent = `${whole.format(extent.source_width)} × ${whole.format(extent.source_height)} cells`
+  paintTicks()
+  if (chosen.trimPlanId) {
+    renderInspector()
+    renderTables()
+    await paintTrimImage(token)
+    return
+  }
+  await refreshTrim(token)
+}
+
+async function refreshTrim(token = chosen.request) {
+  if (!chosen.trim) return
+  const state = trimFormState()
+  const requestToken = ++chosen.trim.requestId
+  try {
+    const options = await send(base() + '/trim/options', { ...state, revision: revision() })
+    if (token !== chosen.request || requestToken !== chosen.trim.requestId) return
+    chosen.trim.options = options
+    if (!options.objectives_differ) chosen.trimBasis = 'longest_segment'
+    renderInspector()
+    renderTables()
+    await paintTrimImage(token)
+  } catch (error) {
+    if (requestToken === chosen.trim.requestId) throw error
+  }
+}
+
+async function paintTrimImage(token) {
+  const plan = activeTrimPlan()
+  const image = $('#raster')
+  $('#empty-image').hidden = true
+  if (chosen.trimPlanId && chosen.trim?.opened) {
+    const basis = chosen.trim.savedBasis ? 'saved' : 'current'
+    const url = anchorURL(base() + `/trim/plans/${chosen.trimPlanId}/preview.png`, { basis, revision: revision() })
+    if (image.dataset.trimBlob) {
+      URL.revokeObjectURL(image.dataset.trimBlob)
+      delete image.dataset.trimBlob
+    }
+    image.src = url
+    redrawRuler()
+    return
+  }
+  if (!plan) return
+  const state = trimFormState()
+  const response = await api(base() + '/trim/preview.png', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...state, objective: chosen.trimBasis, revision: revision() }),
+  })
+  if (token !== chosen.request) return
+  const previous = image.dataset.trimBlob
+  image.src = URL.createObjectURL(await response.blob())
+  if (previous) URL.revokeObjectURL(previous)
+  image.dataset.trimBlob = image.src
+  redrawRuler()
+}
+
+function renderTrim(body) {
+  if (!chosen.trim) chosen.trim = { options: null, selected: [], opened: null, requestId: 0 }
+  const savedPlans = chosen.capture.trim_plans || []
+  body.append(title('Confirmed trim plans'))
+  if (savedPlans.length) {
+    const list = element('div', null, 'review-list')
+    for (const item of savedPlans) {
+      const sub = `${item.objective === 'longest_segment' ? 'Longest segment' : 'Max retained'} · ${item.spot_ids.length} spot(s) · rev ${item.source_revision}`
+      list.append(reviewChoice(item, item.id === chosen.trimPlanId, () => openTrimPlan(item.id), sub))
+    }
+    body.append(list)
+  } else {
+    body.append(copy('No confirmed plan yet. Adjust the inputs below and confirm one of the two trade-off plans.'))
+  }
+  const planActions = element('div', null, 'field-row')
+  if (chosen.trimPlanId) {
+    planActions.append(button('Back to planning', () => {
+      chosen.trimPlanId = ''
+      chosen.trim.opened = null
+      return renderView()
+    }, 'small'))
+  }
+  body.append(planActions)
+
+  if (chosen.trimPlanId && chosen.trim.opened) return renderOpenedTrim(body)
+  body.append(title('Trim inputs'), trimInputsForm())
+  const options = chosen.trim.options
+  if (!options) {
+    body.append(copy('Loading trim candidates…'))
+    return
+  }
+  body.append(copy(`Evaluated ${options.candidate_count} feasible cut layout(s) from ${options.available_spots} detected spots. Two cuts, at most three removed spots.`))
+  body.append(objectiveCards(options))
+  const plan = activeTrimPlan()
+  if (plan) body.append(planSummary(plan))
+}
+
+function trimInputsForm() {
+  const form = element('form')
+  form.id = 'trim-form'
+  const values = trimFormState()
+  const grid = element('div', null, 'field-grid')
+  grid.append(field('Spot margin (mm)', 'margin_mm', values.margin_mm, { type: 'number', required: true }))
+  grid.append(field('Minimum shippable length (mm)', 'minimum_length_mm', values.minimum_length_mm, { type: 'number', required: true }))
+  form.append(grid)
+  const retain = element('div', null, 'field-grid')
+  retain.append(field('Retained sample start (mm)', 'retain_start_mm', values.retain_start_mm ?? '', { type: 'number' }))
+  retain.append(field('Retained sample end (mm)', 'retain_end_mm', values.retain_end_mm ?? '', { type: 'number' }))
+  form.append(retain)
+  const spotLine = element('p', null, 'detail-copy')
+  spotLine.append(
+    Object.assign(document.createElement('strong'), { textContent: 'Removed spots: ' }),
+    document.createTextNode(values.spot_ids.length ? values.spot_ids.join(', ') : 'auto-selected by the chosen trade-off')
+  )
+  form.append(spotLine)
+  form.append(copy('Pick spots from the Surface spots table below (rows are clickable), or leave the automatic recommendation. Selections are limited to three spots that merge into one cut-out interval.'))
+  const actions = element('div', null, 'field-row')
+  actions.append(button('Recompute', guarded(async (event) => {
+    event.preventDefault()
+    await refreshTrim()
+  }), 'small primary'))
+  if (values.spot_ids.length) {
+    actions.append(button('Clear spot selection', () => {
+      chosen.trim.selected = []
+      renderInspector()
+      return refreshTrim()
+    }, 'small'))
+  }
+  form.append(actions)
+  form.addEventListener('submit', (event) => event.preventDefault())
+  let debounce
+  form.addEventListener('input', () => {
+    clearTimeout(debounce)
+    debounce = setTimeout(guarded(() => {
+      if (!form.reportValidity()) return
+      return refreshTrim()
+    }), 350)
+  })
+  return form
+}
+
+function objectiveCards(options) {
+  const wrap = element('div', null, 'objective-list')
+  const manual = chosen.trim.selected.length > 0
+  if (manual) {
+    wrap.append(element('p', `Manual selection of spot(s) ${chosen.trim.selected.join(', ')} is active. The layout below is the exact evaluation of that selection; click a trade-off card to return to automatic recommendations.`, 'result-callout'))
+  }
+  for (const [key, label] of [['longest_segment', 'Longest continuous good material'], ['max_retained', 'Maximum retained material']]) {
+    const plan = options[key]
+    const active = !manual && chosen.trimBasis === key
+    const card = element('button', null, 'objective-card' + (active ? ' active' : ''))
+    card.type = 'button'
+    card.append(element('span', label, 'objective-name'))
+    const metrics = element('span', null, 'objective-metrics')
+    metrics.append(
+      element('em', `Longest ${format(plan.longest_segment_mm)} mm`),
+      element('em', `Retained ${format(plan.retained_length_mm)} mm`),
+      element('em', `${plan.shippable_segment_count} shippable`),
+    )
+    card.append(metrics)
+    card.append(element('span', `Spots ${plan.selected_spots.map((s) => s.spot_id).join(', ') || '—'}`, 'objective-spots'))
+    card.addEventListener('click', guarded(async () => {
+      chosen.trimBasis = key
+      if (manual) chosen.trim.selected = []
+      renderInspector()
+      await refreshTrim()
+    }))
+    wrap.append(card)
+  }
+  if (!options.objectives_differ) {
+    wrap.append(element('p', 'Both trade-offs produce the same cut layout for these constraints.', 'result-callout'))
+  }
+  return wrap
+}
+
+function planSummary(plan) {
+  const wrap = element('div')
+  if (plan.conflicts.length) {
+    for (const item of plan.conflicts) {
+      wrap.append(element('p', '⚠ ' + item.message, 'conflict-callout'))
+    }
+  }
+  for (const item of plan.warnings) {
+    wrap.append(element('p', item, 'warning-callout'))
+  }
+  wrap.append(keyValues({
+    feasible: plan.feasible,
+    cut_count: plan.cut_count,
+    removed_length_mm: plan.removed_length_mm,
+    retained_length_mm: plan.retained_length_mm,
+    longest_segment_mm: plan.longest_segment_mm,
+    shippable_length_mm: plan.shippable_length_mm,
+    total_length_mm: plan.total_length_mm,
+  }))
+  if (plan.feasible && !chosen.trimPlanId) {
+    wrap.append(button('Confirm this plan', guarded(confirmTrimPlan), 'small primary'))
+  }
+  return wrap
+}
+
+async function confirmTrimPlan() {
+  const state = trimFormState()
+  const label = window.prompt('Name this confirmed trim plan', `Trim ${new Date().toLocaleDateString()}`)
+  if (!label) return
+  const result = await send(base() + '/trim/plans', {
+    label,
+    objective: chosen.trimBasis,
+    ...state,
+    revision: revision(),
+  })
+  chosen.capture.state = result.state
+  chosen.capture.trim_plans = [...(chosen.capture.trim_plans || []), result.trim_plan]
+  notify('Trim plan confirmed and stored.')
+  await openTrimPlan(result.trim_plan.id)
+}
+
+async function openTrimPlan(id) {
+  chosen.trimPlanId = id
+  chosen.section = 'trim'
+  chosen.tab = 'analysis'
+  chosen.trim = chosen.trim || { options: null, selected: [], opened: null, requestId: 0 }
+  chosen.trim.savedBasis = true
+  const response = await json(base() + '/trim/plans/' + id)
+  chosen.trim.opened = response
+  await renderView()
+}
+
+function renderOpenedTrim(body) {
+  const opened = chosen.trim.opened
+  const saved = opened.saved
+  body.append(title(saved.label))
+  if (!opened.settings_match) {
+    body.append(element('p', 'Surface-spot detection settings changed after this plan was confirmed. The saved cut layout remains available; the current recomputation may differ.', 'conflict-callout'))
+  }
+  const basisActions = element('div', null, 'field-row')
+  basisActions.append(button('Saved confirmation', () => {
+    chosen.trim.savedBasis = true
+    renderInspector()
+    return paintTrimImage()
+  }, 'small' + (chosen.trim.savedBasis ? ' primary' : '')))
+  basisActions.append(button('Recompute on current scan', () => {
+    chosen.trim.savedBasis = false
+    renderInspector()
+    return paintTrimImage()
+  }, 'small' + (!chosen.trim.savedBasis ? ' primary' : '')))
+  body.append(basisActions)
+  const shown = chosen.trim.savedBasis ? saved.plan : opened.current
+  body.append(keyValues({
+    objective: saved.objective,
+    margin_mm: saved.margin_mm,
+    minimum_length_mm: saved.minimum_length_mm,
+    spot_ids: saved.spot_ids,
+    source_revision: saved.source_revision,
+    created_at: saved.created_at,
+  }))
+  body.append(planSummary(shown))
+  const actions = element('div', null, 'field-row')
+  actions.append(link('Export confirmed plan ZIP', base() + '/trim/plans/' + saved.id + '/export'))
+  actions.append(button('Delete plan', guarded(async () => {
+    if (!window.confirm(`Delete trim plan “${saved.label}”?`)) return
+    const response = await send(base() + '/trim/plans/' + saved.id, { revision: revision() }, 'DELETE')
+    chosen.capture.state = response.state
+    chosen.capture.trim_plans = (chosen.capture.trim_plans || []).filter((item) => item.id !== saved.id)
+    chosen.trimPlanId = ''
+    chosen.trim.opened = null
+    notify('Trim plan deleted.')
+    await renderView()
+  }), 'small danger'))
+  body.append(actions)
+}
+
+function locateTrimSpot(spotId) {
+  if (chosen.section !== 'trim' || chosen.trimPlanId) return
+  if (!chosen.trim) chosen.trim = { options: null, selected: [], opened: null, requestId: 0 }
+  if (chosen.trim.selected.includes(spotId)) {
+    chosen.trim.selected = chosen.trim.selected.filter((id) => id !== spotId)
+  } else if (chosen.trim.selected.length >= 3) {
+    notify('At most three spots can be removed in this downtime window.')
+    return
+  } else {
+    chosen.trim.selected = [...chosen.trim.selected, spotId]
+  }
+  renderInspector()
+  return refreshTrim()
 }
 
 async function inspectSnapshot(id) {
