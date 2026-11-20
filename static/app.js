@@ -95,6 +95,8 @@ const chosen = {
   window: '',
   reviewed: '',
   windowReport: null,
+  partition: null,
+  partitionWindow: '',
   snapshot: null,
   compare: null,
   probe: null,
@@ -206,6 +208,7 @@ async function openCapture(id, reset = true) {
     Object.assign(chosen, {
       section: 'overview', tab: 'analysis', window: '', reviewed: '', snapshot: null,
       compare: null, probe: null, profile: null, ruler: null, rulerPoints: [],
+      partition: null, partitionWindow: '',
     })
   }
   $('#capture-picker').value = detail.id
@@ -609,7 +612,7 @@ function renderWindows(body) {
     const exportUrl = anchorURL(base() + '/windows/' + selected.id + '/export', { revision: revision() })
     actions.append(
       button('View window', guarded(() => inspectWindow(selected.id, true)), 'small'),
-      link('Export evidence', exportUrl),
+      link('Export full evidence ZIP', exportUrl),
       button('New window', () => {
         chosen.reviewed = ''
         chosen.windowReport = null
@@ -618,6 +621,7 @@ function renderWindows(body) {
       }, 'small')
     )
     body.append(actions)
+    body.append(windowPartsPanel(selected))
   }
   if (selected && chosen.windowReport?.window.id === selected.id) {
     body.append(title('Coverage'), keyValues(chosen.windowReport.summary))
@@ -627,6 +631,83 @@ function renderWindows(body) {
     body.append(chart(plot))
   }
   body.append(title(selected ? 'Edit window' : 'New window'), windowForm(selected))
+}
+
+function formatBytes(bytes) {
+  if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + ' MiB'
+  return Math.max(1, Math.round(bytes / 1024)) + ' KiB'
+}
+
+function windowPartsPanel(selected) {
+  const panel = element('section', null, 'parts-panel')
+  panel.append(title('Handoff evidence parts'))
+  panel.append(copy(
+    'Each part stays within the 2 MiB handoff limit and carries its own reflectance cells, '
+    + 'gap record, source scan lines and review sheet. Spot footprints stay whole in one part '
+    + 'wherever possible.'
+  ))
+  const controls = element('div', null, 'field-row')
+  const prepare = button('Prepare parts', guarded(async () => {
+    chosen.partitionWindow = selected.id
+    chosen.partition = null
+    renderInspector()
+    try {
+      const url = anchorURL(base() + '/windows/' + selected.id + '/parts', { revision: revision() })
+      chosen.partition = await json(url)
+    } finally {
+      renderInspector()
+    }
+  }), 'small')
+  controls.append(prepare)
+  panel.append(controls)
+
+  if (chosen.partitionWindow === selected.id && !chosen.partition) {
+    panel.append(copy('Packing evidence and measuring each part…'))
+  }
+  if (chosen.partition && chosen.partitionWindow === selected.id) {
+    const limit = formatBytes(chosen.partition.max_part_bytes)
+    panel.append(copy(
+      `${chosen.partition.parts.length} parts · each at most ${limit} · `
+      + `partition ${chosen.partition.partition_id}`
+    ))
+    const wrapper = element('div', null, 'table-scroll parts-table')
+    const tableNode = element('table')
+    const head = tableNode.createTHead().insertRow()
+    for (const label of ['Part', 'Stations (mm)', 'Size', 'Split spots', 'Download']) {
+      const cell = element('th', label)
+      cell.scope = 'col'
+      head.append(cell)
+    }
+    const tbody = tableNode.createTBody()
+    for (const part of chosen.partition.parts) {
+      const row = tbody.insertRow()
+      row.append(
+        element('td', `${part.part_index} / ${part.part_count}`),
+        element('td', `${format(part.station_start_mm)}–${format(part.station_end_mm)}`, 'tabular'),
+        element('td', formatBytes(part.bytes), 'tabular'),
+        element('td', part.split_spot_ids.length ? part.split_spot_ids.join(', ') : '—'),
+      )
+      const href = anchorURL(
+        base() + `/windows/${selected.id}/parts/${part.part_index}`,
+        { revision: revision() }
+      )
+      const download = element('a', `Part ${part.part_index}`, 'button small')
+      download.href = href
+      const cell = element('td')
+      cell.append(download)
+      row.append(cell)
+    }
+    wrapper.append(tableNode)
+    panel.append(wrapper)
+    const splitParts = chosen.partition.parts.filter((part) => part.split_spot_ids.length)
+    if (splitParts.length) {
+      panel.append(copy(
+        'Split spot IDs appear in every part that carries a piece of the same observation; '
+        + 'the matching spot_observation_parts field is listed in each part’s spots.csv.'
+      ))
+    }
+  }
+  return panel
 }
 
 function windowForm(selected) {
@@ -655,6 +736,8 @@ function windowForm(selected) {
       if (chosen.window === selected.id) chosen.window = ''
       chosen.reviewed = ''
       chosen.windowReport = null
+      chosen.partition = null
+      chosen.partitionWindow = ''
       updateCaptureChrome()
       await renderView()
       notify('Window removed.')
@@ -673,6 +756,8 @@ function windowForm(selected) {
     const url = base() + '/windows' + (selected ? '/' + selected.id : '')
     const outcome = await send(url, payload, selected ? 'PUT' : 'POST')
     chosen.capture.state = outcome.state
+    chosen.partition = null
+    chosen.partitionWindow = ''
     await inspectWindow(outcome.window.id, true)
     notify('Review window saved.')
   }))

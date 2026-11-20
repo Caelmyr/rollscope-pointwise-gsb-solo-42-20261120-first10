@@ -8,8 +8,9 @@ from .archive import project_export, read_project
 from .capture_codec import read_capture
 from .compare import snapshot_comparison
 from .demo import build_demo
-from .domain import RevisionConflict, UserInputError
+from .domain import MissingRecord, RevisionConflict, UserInputError
 from .evidence import current_package, snapshot_package, window_package
+from .window_parts import build_partition, partition_plan
 from .measure_export import export_ruler
 from .probe import cross_section, point_measurement, view_extent
 from .raster import ACQUISITION_LAYERS, RasterSpec, png_bytes, preview_image
@@ -139,6 +140,20 @@ class CaptureService:
         record, context = self.configured(ref, expected)
         window = record.state.get_window(window_id)
         return window_package(record, context, window)
+
+    def window_partition(self, ref, expected, window_id):
+        record, context = self.configured(ref, expected)
+        window = record.state.get_window(window_id)
+        return partition_plan(record, context, window)
+
+    def window_part_export(self, ref, expected, window_id, part_index):
+        record, context = self.configured(ref, expected)
+        window = record.state.get_window(window_id)
+        _, parts = build_partition(record, context, window)
+        for part in parts:
+            if part.index == part_index:
+                return part.payload, len(parts), part.index
+        raise MissingRecord("That evidence part does not exist for this window.")
 
     def render_spec(self, record, layer, overlays, window_id):
         if window_id is None or layer in ACQUISITION_LAYERS:

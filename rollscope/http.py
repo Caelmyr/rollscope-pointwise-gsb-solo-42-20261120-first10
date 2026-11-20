@@ -267,6 +267,25 @@ def window_export(ref, window_id):
     return stream_attachment(result, f"rollscope-{ref}-window-{window_id}.zip", "application/zip")
 
 
+@api.get("/captures/<ref>/windows/<window_id>/parts")
+def window_parts(ref, window_id):
+    return capture_service().window_partition(ref, revision_argument(), window_id)
+
+
+@api.get("/captures/<ref>/windows/<window_id>/parts/<part_ref>")
+def window_part_download(ref, window_id, part_ref):
+    try:
+        part_index = int(part_ref)
+    except ValueError as error:
+        raise UserInputError("Evidence part must be a whole number.") from error
+    whole_number(part_index, "Evidence part", 1, 2**31 - 1)
+    payload, part_count, index = capture_service().window_part_export(
+        ref, revision_argument(), window_id, part_index
+    )
+    name = f"rollscope-{ref}-window-{window_id}-part{index:02d}-of-{part_count:02d}.zip"
+    return stream_attachment(payload, name, "application/zip")
+
+
 @api.post("/captures/<ref>/snapshots")
 def create_snapshot(ref):
     payload, revision = body(("section", "label"), with_revision=True)
