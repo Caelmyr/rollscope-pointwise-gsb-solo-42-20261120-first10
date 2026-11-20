@@ -216,9 +216,36 @@ def preview_image(context, spec):
     else:
         pixels = grid_layer(context, indices, rows, spec.layer)
     image = Image.fromarray(pixels)
+    if spec.layer not in ACQUISITION_LAYERS:
+        image = draw_uncalibrated_bands(image, mapping, context)
     if spec.show_overlays and spec.layer not in ACQUISITION_LAYERS:
         ReviewDrawing(image, mapping, context).render(spec.layer)
     return image, mapping
+
+
+def draw_uncalibrated_bands(image, mapping, context):
+    grid = context.grid
+    if grid.transverse_calibrated is None:
+        return image
+    visible_mask = grid.calibrated_mask[mapping.columns.start : mapping.columns.stop]
+    if visible_mask.all():
+        return image
+    base = image.convert("RGBA")
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    painter = ImageDraw.Draw(overlay)
+    count = mapping.column_count
+    for start, stop in true_runs(~visible_mask):
+        x0 = start * mapping.width / count
+        x1 = stop * mapping.width / count
+        painter.rectangle((x0, 0, x1, mapping.height), fill=(232, 121, 119, 74))
+        stripe_step = max(10, mapping.width // 48)
+        for offset in range(-mapping.height, mapping.width, stripe_step):
+            painter.line(
+                (offset + x0, mapping.height, offset + mapping.height + x0, 0),
+                fill=(232, 121, 119, 58),
+                width=2,
+            )
+    return Image.alpha_composite(base, overlay).convert("RGB")
 
 
 def png_bytes(image):
@@ -268,8 +295,9 @@ class ReviewDrawing:
         grid = self.context.grid
         start = self.mapping.rows.start
         stop = self.mapping.rows.stop
+        column_index = np.arange(grid.shape[1], dtype=np.float64)
         for side in (edges.left_mm, edges.right_mm):
-            columns = (side[start:stop] - grid.transverse[0]) / grid.column_pitch_mm
+            columns = np.interp(side[start:stop], grid.transverse, column_index)
             for lower, upper in true_runs(np.isfinite(columns)):
                 points = [
                     self.mapping.pixel(row + start, columns[row]) for row in range(lower, upper)

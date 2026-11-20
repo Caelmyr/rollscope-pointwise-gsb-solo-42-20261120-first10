@@ -13,13 +13,19 @@ def point_measurement(context, spec, x, y):
     result = {
         "layer": spec.layer.value,
         "column": column,
-        "transverse_mm": float(context.capture.transverse[column]),
+        "transverse_mm": float(transverse_coordinate(context, spec, column)),
         "coordinate": mapping.as_dict(),
         "lineage": detailed_lineage(context, row, column, spec.layer.value),
     }
     if spec.layer in ACQUISITION_LAYERS:
         return result | acquisition_point(context, row, column)
     return result | station_point(context, row, column, spec.layer)
+
+
+def transverse_coordinate(context, spec, column):
+    if spec.layer in ACQUISITION_LAYERS:
+        return context.capture.transverse[column]
+    return context.grid.transverse[column]
 
 
 def acquisition_point(context, row, column):
@@ -47,6 +53,7 @@ def station_point(context, row, column, layer):
     result = grid.provenance(row, column) | {
         "valid": bool(grid.valid[row, column]),
         "reflectance": safe_value(grid.values[row, column]),
+        "transverse_calibrated": bool(grid.calibrated_mask[column]),
     }
     if layer == Layer.SPOTS:
         result.update(context.spots.pixel(row, column))
@@ -79,14 +86,19 @@ def cross_section(context, spec, y, points):
         coverage = Support(context.grid.plan.support[row]).name.lower()
 
     indices = extrema_indices([np.where(validity, values, np.nan)], points)
+    if spec.layer in ACQUISITION_LAYERS or context.grid.transverse_calibrated is None:
+        calibrated_flags = [True] * len(indices)
+    else:
+        calibrated_flags = context.grid.calibrated_mask[cols[indices]].astype(bool).tolist()
     measurements = [
         {
             "column": int(cols[index]),
-            "transverse_mm": float(context.capture.transverse[cols[index]]),
+            "transverse_mm": float(transverse_coordinate(context, spec, cols[index])),
             "value": safe_value(values[index]),
             "valid": bool(validity[index]),
+            "calibrated": bool(calibrated_flag),
         }
-        for index in indices
+        for index, calibrated_flag in zip(indices, calibrated_flags)
     ]
     return {
         "station_mm": float(position),
@@ -131,17 +143,24 @@ def view_extent(context, spec):
         y0 = mapping.rows.start
         y1 = mapping.rows.stop - 1
         y_units = "line"
+        transverse = context.capture.transverse
     else:
         stations = context.grid.stations
         y0 = float(stations[mapping.rows.start])
         y1 = float(stations[mapping.rows.stop - 1])
         y_units = "mm"
-    transverse = context.capture.transverse
+        transverse = context.grid.transverse
     return mapping.as_dict() | {
         "y_from": y0,
         "y_to": y1,
         "y_unit": y_units,
         "x_from_mm": float(transverse[mapping.columns.start]),
         "x_to_mm": float(transverse[mapping.columns.stop - 1]),
+        "x_calibrated": (
+            context.grid.calibrated_mask[mapping.columns.start : mapping.columns.stop].tolist()
+            if spec.layer not in ACQUISITION_LAYERS
+            and context.grid.transverse_calibrated is not None
+            else None
+        ),
     }
 

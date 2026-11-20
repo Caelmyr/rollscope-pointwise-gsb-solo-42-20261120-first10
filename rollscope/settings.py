@@ -183,8 +183,23 @@ class SpliceSettings:
         )
 
 
+@dataclass(frozen=True)
+class TransverseSettings:
+    minimum_prominence: float = 3.0
+
+    @classmethod
+    def parse(cls, data):
+        value = overlay(cls(), data, "Transverse calibration settings")
+        return cls(
+            minimum_prominence=finite_number(
+                value["minimum_prominence"], "Minimum ruler line prominence", 1.0, 40.0
+            ),
+        )
+
+
 SETTINGS_TYPES = {
     "calibration": CalibrationSettings,
+    "transverse": TransverseSettings,
     "grid": GridSettings,
     "edges": EdgeSettings,
     "spots": SpotSettings,
@@ -198,6 +213,7 @@ SETTINGS_TYPES = {
 @dataclass(frozen=True)
 class AnalysisSettings:
     calibration: CalibrationSettings
+    transverse: TransverseSettings
     grid: GridSettings
     edges: EdgeSettings
     spots: SpotSettings

@@ -12,6 +12,7 @@ class EdgeState(IntEnum):
     CLIPPED = 1
     COMPLETE = 2
     DISCONTINUOUS = 3
+    UNCALIBRATED = 4
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class StripEdges:
     states: np.ndarray
     material: np.ndarray
     intervals: np.ndarray
+    calibrated: np.ndarray
 
     @property
     def center_mm(self):
@@ -50,11 +52,14 @@ class StripEdges:
             state.name.lower(): int(np.count_nonzero(self.states == state.value))
             for state in EdgeState
         }
+        reliable = self.width_mm[self.calibrated & np.isfinite(self.width_mm)]
         return {
             "rows": counts,
             "width_mm": scale_summary(self.width_mm),
+            "calibrated_width_mm": scale_summary(reliable),
             "center_mm": scale_summary(self.center_mm),
             "valid_material_pixels": int(np.count_nonzero(self.material)),
+            "uncalibrated_rows": int(np.count_nonzero(~self.calibrated)),
         }
 
     def row_table(self, indices):
@@ -67,6 +72,7 @@ class StripEdges:
                 "right_mm": safe_value(self.right_mm[row]),
                 "width_mm": safe_value(self.width_mm[row]),
                 "center_mm": safe_value(center[row]),
+                "calibrated": bool(self.calibrated[row]),
                 "status": EdgeState(self.states[row]).name.lower(),
             }
             for row in indices
@@ -174,9 +180,23 @@ def track_edges(grid, settings):
         missing_count = 0
         previous = span
 
-    cross_pitch = grid.column_pitch_mm
-    start = float(grid.transverse[0])
-    left = start + left * cross_pitch
-    right = start + right * cross_pitch
+    transverse = grid.transverse
+    column_index = np.arange(columns, dtype=np.float64)
+    left = np.interp(left, column_index, transverse, left=np.nan, right=np.nan)
+    right = np.interp(right, column_index, transverse, left=np.nan, right=np.nan)
     width = right - left
-    return StripEdges(grid.stations, left, right, width, states, material, intervals)
+    mask = grid.calibrated_mask
+    calibrated = np.ones(count, dtype=bool)
+    measured = np.isfinite(width)
+    if np.any(measured):
+        index = np.flatnonzero(measured)
+        left_fraction = np.interp(left[measured], transverse, column_index)
+        right_fraction = np.interp(right[measured], transverse, column_index)
+        left_index = np.clip(np.floor(left_fraction).astype(int), 0, columns - 1)
+        right_index = np.clip(np.ceil(right_fraction).astype(int), 0, columns - 1)
+        covered = mask[left_index] & mask[right_index]
+        calibrated[index[~covered]] = False
+        states[index[~covered]] = EdgeState.UNCALIBRATED
+    return StripEdges(
+        grid.stations, left, right, width, states, material, intervals, calibrated
+    )

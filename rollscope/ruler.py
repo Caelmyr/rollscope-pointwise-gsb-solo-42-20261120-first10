@@ -85,6 +85,7 @@ class MeasuredPath:
     states: np.ndarray
     record_values: np.ndarray
     spot_ids: np.ndarray
+    calibrated_cells: np.ndarray | None = None
 
     @property
     def widths(self):
@@ -99,6 +100,11 @@ class MeasuredPath:
         chip = self.record_values[self.states == PathSupport.MATERIAL]
         weights = widths[self.states == PathSupport.MATERIAL]
         reflectance = float(np.average(chip, weights=weights)) if weights.size else None
+        uncalibrated_width = (
+            float(np.sum(widths[~self.calibrated_cells]))
+            if self.calibrated_cells is not None
+            else 0.0
+        )
         return {
             "length_mm": self.ruler.length,
             "travel_component_mm": self.ruler.dy,
@@ -108,6 +114,10 @@ class MeasuredPath:
             "distance_by_support_mm": state_counts,
             "weighted_material_reflectance": reflectance,
             "intersected_spots": len(np.unique(self.spot_ids[self.spot_ids > 0])),
+            "uncalibrated_length_mm": uncalibrated_width,
+            "fully_calibrated": bool(
+                self.calibrated_cells is None or bool(np.all(self.calibrated_cells))
+            ),
         }
 
     def profile(self, maximum_points=None):
@@ -128,6 +138,11 @@ class MeasuredPath:
                 "state": PathSupport(self.states[index]).name.lower(),
                 "reflectance": safe_value(self.record_values[index]),
                 "spot_id": int(self.spot_ids[index]) or None,
+                "calibrated": (
+                    True
+                    if self.calibrated_cells is None
+                    else bool(self.calibrated_cells[index])
+                ),
             }
             for local, index in enumerate(indices)
         ]
@@ -219,4 +234,10 @@ def evaluate_ruler(context, ruler):
     states[grid.plan.support[rows] == Support.GAP] = PathSupport.GAP
     values = grid.values[rows, columns]
     spot_ids = context.spots.labels[rows, columns]
-    return MeasuredPath(ruler, enter, leave, rows, columns, states, values, spot_ids)
+    if grid.transverse_calibrated is None:
+        calibrated_cells = None
+    else:
+        calibrated_cells = grid.calibrated_mask[columns]
+    return MeasuredPath(
+        ruler, enter, leave, rows, columns, states, values, spot_ids, calibrated_cells
+    )

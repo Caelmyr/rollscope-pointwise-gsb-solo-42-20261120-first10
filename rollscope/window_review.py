@@ -86,6 +86,8 @@ def support_summary(cells, row_pitch, column_pitch):
     known = int(np.count_nonzero(cells.valid))
     material = int(np.count_nonzero(cells.material))
     gaps = list(window_gaps(cells))
+    transverse_span = float(cells.transverse[-1] - cells.transverse[0])
+    mean_column_pitch = transverse_span / max(1, len(cells.transverse) - 1)
     return {
         "rows": len(cells.stations),
         "columns": len(cells.transverse),
@@ -95,7 +97,7 @@ def support_summary(cells, row_pitch, column_pitch):
         "material_fraction": material / cells.size,
         "gap_count": len(gaps),
         "sampled_gap_length_mm": sum(gap["cells"] for gap in gaps) * row_pitch,
-        "observed_material_area_mm2": material * row_pitch * column_pitch,
+        "observed_material_area_mm2": material * row_pitch * mean_column_pitch,
         "material_reflectance": scale_summary(cells.values[cells.material]),
     }
 

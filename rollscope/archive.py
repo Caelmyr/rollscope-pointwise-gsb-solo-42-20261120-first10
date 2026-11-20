@@ -9,10 +9,11 @@ from zipfile import BadZipFile, ZipFile
 
 from .analysis import SECTION_TITLES
 from .capture_codec import MAX_BUNDLE_BYTES, capture_bytes, capture_hash, read_capture
-from .domain import UserInputError, clean_text, exact_keys, expect_object, whole_number
+from .domain import UserInputError, clean_text, exact_keys, expect_object, reject_unknown, whole_number
 from .evidence import EVIDENCE_FORMAT, Evidence
 from .records import MAX_SNAPSHOTS, MAX_WINDOWS, CaptureState, InspectionSnapshot, ReviewWindow
 from .settings import AnalysisSettings
+from .transverse import TransverseCalibration
 
 
 MAX_PROJECT_BYTES = 48 * 1024 * 1024
@@ -151,7 +152,19 @@ def timestamp(value):
 
 def restore_state(payload, capture):
     data = json_document(payload, "Project state")
-    exact_keys(data, ("revision", "notes", "settings", "windows", "updated_at"), "Project state")
+    expected = (
+        "revision",
+        "notes",
+        "settings",
+        "windows",
+        "updated_at",
+        "transverse_calibration",
+    )
+    # Archives written before transverse calibration existed omit that key.
+    reject_unknown(data, expected, "Project state")
+    for key in ("revision", "notes", "settings", "windows", "updated_at"):
+        if key not in data:
+            raise UserInputError(f"Project state is missing a required field: {key}.")
     windows = data["windows"]
     if not isinstance(windows, list) or len(windows) > MAX_WINDOWS:
         raise UserInputError("The archive exceeds the review window limit.")
@@ -164,12 +177,21 @@ def restore_state(payload, capture):
             raise UserInputError("The archive contains duplicate review window IDs.")
         ids.add(ref)
         records.append(ReviewWindow.from_request(entry, capture, ref))
+    calibration_data = data.get("transverse_calibration")
+    transverse_calibration = (
+        TransverseCalibration.parse(calibration_data) if calibration_data else None
+    )
+    if transverse_calibration is not None and transverse_calibration.columns != capture.columns:
+        raise UserInputError(
+            "The archived transverse calibration was built for a different column count."
+        )
     return CaptureState(
         whole_number(data["revision"], "Archived revision", 0, 2**31 - 1),
         AnalysisSettings.parse(data["settings"]),
         tuple(records),
         clean_text(data["notes"], "Archived capture notes", 4000, True),
         timestamp(data["updated_at"]),
+        transverse_calibration,
     )
 
 

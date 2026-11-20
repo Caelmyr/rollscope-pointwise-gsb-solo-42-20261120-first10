@@ -34,9 +34,10 @@ SECTION_TITLES = {
 
 
 class AnalysisContext:
-    def __init__(self, capture, settings):
+    def __init__(self, capture, settings, transverse_calibration=None):
         self.capture = capture
         self.settings = settings
+        self.transverse_calibration = transverse_calibration
 
     @cached_property
     def calibrated(self):
@@ -44,7 +45,12 @@ class AnalysisContext:
 
     @cached_property
     def grid(self):
-        return build_grid(self.capture, self.calibrated, self.settings.grid)
+        return build_grid(
+            self.capture,
+            self.calibrated,
+            self.settings.grid,
+            self.transverse_calibration,
+        )
 
     @cached_property
     def coverage(self):
@@ -89,12 +95,15 @@ class AnalysisCache:
         self.entries = OrderedDict()
         self.lock = RLock()
 
-    def context(self, ref, sha, capture, settings):
-        key = (ref, sha, settings)
+    def context(self, ref, sha, capture, settings, transverse_calibration=None):
+        calibration_id = (
+            transverse_calibration.calibration_id if transverse_calibration else None
+        )
+        key = (ref, sha, settings, calibration_id)
         with self.lock:
             context = self.entries.pop(key, None)
             if context is None:
-                context = AnalysisContext(capture, settings)
+                context = AnalysisContext(capture, settings, transverse_calibration)
             self.entries[key] = context
             while len(self.entries) > self.limit:
                 self.entries.popitem(last=False)
@@ -288,11 +297,14 @@ def inspect_summary(context):
     grid = context.grid.summary()
     edges = context.edges.summary()
     flat = context.calibrated.summary()
+    calibrated_width = edges["calibrated_width_mm"]["median"]
     return {
         "stations": grid["stations"],
         "pitch_mm": grid["pitch_mm"],
         "known_fraction": grid["valid_fraction"],
         "gap_count": context.coverage.summary()["encoder_gap_count"],
-        "width_mm": edges["width_mm"]["median"],
+        "width_mm": calibrated_width if calibrated_width is not None else edges["width_mm"]["median"],
+        "width_calibrated": calibrated_width is not None,
+        "uncalibrated_columns": grid.get("uncalibrated_columns", 0),
         "suspect_columns": flat["reference"]["rejected_columns"],
     }

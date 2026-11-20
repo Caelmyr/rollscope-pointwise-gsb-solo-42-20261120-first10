@@ -1,4 +1,5 @@
 from PIL import ImageDraw
+import numpy as np
 
 from .evidence import Evidence
 from .raster import Layer, RasterSpec, png_bytes, preview_image
@@ -18,14 +19,13 @@ def ruler_view(context, path):
     image, mapping = preview_image(context, RasterSpec(Layer.STATION))
     draw = ImageDraw.Draw(image)
     grid = context.grid
-    x_origin = grid.transverse[0]
     y_origin = grid.stations[0]
+    column_index = np.arange(grid.shape[1], dtype=np.float64)
 
     def in_image(stations, transverse):
-        return mapping.pixel(
-            (stations - y_origin) / grid.row_pitch_mm,
-            (transverse - x_origin) / grid.column_pitch_mm,
-        )
+        row = (stations - y_origin) / grid.row_pitch_mm
+        column = float(np.interp(transverse, grid.transverse, column_index))
+        return mapping.pixel(row, column)
 
     boundary = 0
     while boundary < len(path.states):

@@ -69,7 +69,7 @@ def format_scalar(value, suffix="", decimals=2):
 def panel_plan(grid, cells, maximum=4):
     row_count = cells.rows.stop - cells.rows.start
     column_count = cells.columns.stop - cells.columns.start
-    cross_size = grid.column_pitch_mm * column_count
+    cross_size = float(cells.transverse[-1] - cells.transverse[0])
     along_size = grid.row_pitch_mm * row_count
     count = math.ceil(along_size / (3.6 * cross_size))
     count = max(1, min(maximum, count))

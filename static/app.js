@@ -13,6 +13,7 @@ const VIEW = {
   texture: ['Texture', 'Stripe direction estimated inside supported material tiles', 'texture', 'texture'],
   illumination: ['Reflectance trend', 'Across-strip and along-roll material reflectance', 'illumination'],
   windows: ['Review windows', 'Saved bounds in physical station coordinates', 'station'],
+  transverse: ['Transverse calibration', 'Cross-web ruler mapping with evidence grades and a reliable span', 'sensor', 'transverse'],
   ruler: ['Ruler', 'Measure across sheet, bad pixels and acquisition gaps', 'station'],
   snapshots: ['Saved reports', 'Previously recorded measurements and settings', 'station'],
 }
@@ -22,6 +23,9 @@ const SETTINGS = {
     ['minimum_response', 'Minimum response (ADU)', '1'],
     ['maximum_reference_noise', 'Maximum reference variation (ADU)'],
     ['saturation_code', 'Saturation code (ADU)', '1'],
+  ],
+  transverse: [
+    ['minimum_prominence', 'Minimum ruler line prominence'],
   ],
   grid: [
     ['pitch_mm', 'Station pitch (mm)'],
@@ -77,6 +81,7 @@ const LEGEND = {
   splices: [['splice', 'Join candidate'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   texture: [['edge', 'Stripe direction'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   illumination: [['reflectance', 'Reflectance'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
+  transverse: [['reflectance', 'Raw sensor codes'], ['mark', 'Ruler line'], ['dark', 'Stain or weak evidence']],
 }
 
 const REGION = [
@@ -101,13 +106,15 @@ const chosen = {
   profile: null,
   rulerPoints: [],
   ruler: null,
+  rulerLines: null,
+  transverse: null,
   request: 0,
   load: 0,
   probeRequest: 0,
 }
 
 let toastTimer
-const regularView = () => !['windows', 'ruler', 'snapshots'].includes(chosen.section)
+const regularView = () => !['windows', 'ruler', 'snapshots', 'transverse'].includes(chosen.section)
 const layer = () => VIEW[chosen.section][2]
 const revision = () => chosen.capture.state.revision
 const base = () => '/api/captures/' + chosen.capture.id
@@ -206,6 +213,7 @@ async function openCapture(id, reset = true) {
     Object.assign(chosen, {
       section: 'overview', tab: 'analysis', window: '', reviewed: '', snapshot: null,
       compare: null, probe: null, profile: null, ruler: null, rulerPoints: [],
+      rulerLines: null, transverse: null,
     })
   }
   $('#capture-picker').value = detail.id
@@ -227,7 +235,8 @@ function updateCaptureChrome() {
     ['Station pitch', format(sample.pitch_mm), 'mm', '↕'],
     ['Usable grid', (sample.known_fraction * 100).toFixed(1), '%', '⊡'],
     ['Encoder gaps', whole.format(sample.gap_count), '', '⋯', sample.gap_count > 0],
-    ['Median strip width', format(sample.width_mm), 'mm', '↔'],
+    [sample.width_calibrated ? 'Calibrated strip width' : 'Median strip width',
+      format(sample.width_mm), 'mm', '↔', sample.uncalibrated_columns > 0],
   ]
   $('#readings').replaceChildren(...entries.map(([title, value, unit, signal, caution]) => {
     const card = element('div', null, 'reading' + (caution ? ' attention' : ''))
@@ -271,7 +280,9 @@ async function renderView() {
   }))
   $('#view-footnote').textContent = chosen.section === 'ruler'
     ? 'Select two points on the station image.'
-    : 'Select a pixel to inspect its source lines.'
+    : chosen.section === 'transverse'
+      ? 'Ruler lines are detected from this raw picture. Grade their evidence in the inspector.'
+      : 'Select a pixel to inspect its source lines.'
   const sectionLink = $('#section-download')
   sectionLink.hidden = !regularView()
   if (regularView()) {
@@ -290,10 +301,12 @@ async function renderView() {
   renderInspector()
   renderTables()
   try {
-    const result = await Promise.all([
+    const requests = [
       json(viewURL),
       analysisURL ? json(analysisURL) : Promise.resolve(null),
-    ])
+    ]
+    if (chosen.section === 'transverse') requests.push(loadTransverseData())
+    const result = await Promise.all(requests)
     if (token !== chosen.request) return
     chosen.extent = result[0]
     chosen.analysis = result[1]
@@ -358,6 +371,7 @@ function renderInspector() {
   if (chosen.tab === 'settings') return renderSettings(body)
   if (chosen.tab === 'probe') return renderProbe(body)
   if (chosen.tab === 'notes') return renderNotes(body)
+  if (chosen.section === 'transverse') return renderTransverse(body)
   if (chosen.section === 'windows') return renderWindows(body)
   if (chosen.section === 'ruler') return renderRuler(body)
   if (chosen.section === 'snapshots') return renderSnapshots(body)
@@ -370,6 +384,7 @@ function renderInspector() {
 }
 
 function tableBlocks() {
+  if (chosen.section === 'transverse') return []
   if (chosen.section === 'windows' && chosen.windowReport) {
     return [
       { title: 'Unsampled intervals', rows: chosen.windowReport.gaps },
@@ -677,6 +692,223 @@ function windowForm(selected) {
     notify('Review window saved.')
   }))
   return form
+}
+
+async function loadTransverseData() {
+  const [lines, calibration] = await Promise.all([
+    json(base() + '/transverse/lines'),
+    json(base() + '/transverse'),
+  ])
+  chosen.rulerLines = lines
+  chosen.transverse = calibration
+}
+
+function renderTransverse(body) {
+  if (!chosen.rulerLines) {
+    body.append(copy('Loading ruler lines…'))
+    return
+  }
+  const data = chosen.rulerLines
+  const existing = chosen.capture.state.transverse_calibration
+  body.append(title('Ruler picture'))
+  body.append(copy(
+    `Detected ${data.line_count} dark ruler line${data.line_count === 1 ? '' : 's'} across ${data.capture.columns} detector columns. `
+    + 'Enter the known transverse position (mm) printed beside each line, then build the calibration.'
+  ))
+  if (existing) body.append(calibrationCallout(existing))
+  body.append(transverseForm(data))
+  if (chosen.transverse?.calibration) body.append(savedCalibration())
+}
+
+function calibrationCallout(calibration) {
+  const note = element('p', null, 'result-callout')
+  note.textContent = `Active calibration: ${calibration.anchor_count} anchors, RMS ${format(calibration.rms_error_mm)} mm, `
+    + `reliable span ${format(calibration.first_mm)}–${format(calibration.last_mm)} mm. Columns outside this span stay uncalibrated.`
+  return note
+}
+
+function transverseForm(data) {
+  const form = element('form')
+  const existing = chosen.capture.state.transverse_calibration
+  const previous = new Map((existing?.anchors || []).map((anchor) => [anchor.line_id, anchor.known_mm]))
+  const rows = data.lines.map((line) => ({
+    line_id: line.line_id,
+    column: line.column,
+    slope: line.slope,
+    prominence: line.prominence,
+    coverage: line.coverage,
+    straightness: line.straightness,
+    score: line.score,
+    stained: line.stained,
+    stain_fraction: line.stain_fraction,
+    status: line.rejected_reason || 'ok',
+    known_mm: previous.has(line.line_id) ? previous.get(line.line_id) : '',
+    included: !line.rejected_reason,
+  }))
+  const grid = element('div', null, 'ruler-grid')
+  const head = element('div', null, 'ruler-row ruler-head')
+  ['Line', 'Column', 'Slope', 'Prominence', 'Coverage', 'Bend', 'Evidence', 'Known mm', 'Use'].forEach((name) => {
+    head.append(element('span', name))
+  })
+  grid.append(head)
+  for (const row of rows) {
+    const node = element('div', null, 'ruler-row' + (row.stained ? ' flagged' : '') + (row.status !== 'ok' ? ' weak' : ''))
+    node.append(element('span', String(row.line_id), 'mono'))
+    node.append(element('span', format(row.column), 'mono'))
+    node.append(element('span', format(row.slope), 'mono'))
+    node.append(element('span', format(row.prominence), 'mono'))
+    node.append(element('span', (row.coverage * 100).toFixed(0) + '%', 'mono'))
+    node.append(element('span', format(row.straightness), 'mono'))
+    const evidence = element('span', null, 'evidence-cell')
+    evidence.append(evidenceBadge(row))
+    node.append(evidence)
+    const position = element('input')
+    position.type = 'number'
+    position.step = 'any'
+    position.name = `position_${row.line_id}`
+    position.value = row.known_mm
+    position.required = true
+    node.append(position)
+    const include = element('input')
+    include.type = 'checkbox'
+    include.name = `include_${row.line_id}`
+    include.checked = row.included
+    node.append(include)
+    grid.append(node)
+  }
+  form.append(grid)
+  const weakest = [...rows].sort((a, b) => a.score - b.score)[0]
+  if (weakest) {
+    body_weakness(form, weakest, rows)
+  }
+  const actions = element('div', null, 'field-row')
+  const submit = element('button', 'Build calibration', 'button primary small')
+  submit.type = 'submit'
+  actions.append(submit)
+  actions.append(button('Export calibration', guarded(exportTransverse), 'small'))
+  const importButton = button('Import calibration…', () => importTransverse(form), 'small')
+  actions.append(importButton)
+  if (chosen.capture.state.transverse_calibration) {
+    actions.append(button('Remove calibration', guarded(removeTransverse), 'small danger'))
+  }
+  form.append(actions)
+  form.addEventListener('submit', guarded(async (event) => {
+    event.preventDefault()
+    const entries = new FormData(form)
+    const positions = data.lines.map((line) => Number(entries.get(`position_${line.line_id}`)))
+    if (positions.some((value) => !Number.isFinite(value))) {
+      throw new Error('Give every ruler line a known transverse position in millimetres.')
+    }
+    const accepted = data.lines
+      .filter((line) => entries.get(`include_${line.line_id}`) === 'on')
+      .map((line) => line.line_id)
+    const response = await send(base() + '/transverse', {
+      revision: revision(), positions_mm: positions, accepted_lines: accepted,
+    })
+    chosen.capture.state = response.state
+    await refreshTransverse()
+    notify('Transverse calibration built. Unreliable lines are listed below.')
+  }))
+  return form
+}
+
+function body_weakness(form, weakest, rows) {
+  const reasons = {
+    faint_line: 'faint contrast',
+    partial_line: 'partial row coverage',
+    bent_line: 'excessive bend',
+    ok: weakest.stained ? 'a nearby stain' : 'the lowest evidence score',
+  }
+  const text = `Weakest evidence: line ${weakest.line_id} (${reasons[weakest.status] || weakest.status}, score ${format(weakest.score)}). `
+    + 'Untick "Use" to exclude it before building so a local deformation cannot pull neighbouring widths.'
+  form.append(element('p', text, 'detail-copy warning-copy'))
+}
+
+function evidenceBadge(row) {
+  const badge = element('span', null, 'evidence-badge')
+  if (row.status !== 'ok') {
+    badge.classList.add('badge-weak')
+    badge.textContent = row.status.replaceAll('_', ' ')
+    return badge
+  }
+  if (row.stained) {
+    badge.classList.add('badge-stain')
+    badge.textContent = `stain ${(row.stain_fraction * 100).toFixed(0)}%`
+    return badge
+  }
+  badge.classList.add('badge-ok')
+  badge.textContent = 'reliable'
+  return badge
+}
+
+function savedCalibration() {
+  const block = element('div')
+  const calibration = chosen.transverse.calibration
+  block.append(title('Current calibration'), keyValues(calibration))
+  const anchorRows = chosen.transverse.anchors.map((anchor) => ({
+    line_id: anchor.line_id,
+    column: anchor.column,
+    known_mm: anchor.known_mm,
+    calibrated_mm: anchor.calibrated_mm,
+    fit_residual_mm: anchor.fit_residual_mm,
+    robust_outlier: anchor.robust_outlier,
+    score: anchor.score,
+    stained: anchor.stained,
+  }))
+  block.append(table(anchorRows, null, 'table-scroll mini-table'))
+  block.append(chart({
+    title: 'Anchor fit residual (mm)', x: 'line_id', y: ['fit_residual_mm'], unit: 'mm',
+    records: anchorRows,
+  }))
+  if (chosen.transverse.rejected_lines.length) {
+    block.append(title('Excluded ruler lines'))
+    block.append(table(chosen.transverse.rejected_lines, null, 'table-scroll mini-table'))
+  }
+  return block
+}
+
+async function refreshTransverse() {
+  await loadTransverseData()
+  renderInspector()
+  renderTables()
+  updateCaptureChrome()
+}
+
+async function exportTransverse() {
+  const response = await api(base() + '/transverse/export')
+  const payload = await response.json()
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const anchor = link('Download calibration JSON', url)
+  anchor.download = `rollscope-${chosen.capture.id}-transverse.json`
+  document.body.append(anchor)
+  anchor.click()
+  anchor.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+function importTransverse(form) {
+  const picker = element('input')
+  picker.type = 'file'
+  picker.accept = '.json,application/json'
+  picker.addEventListener('change', guarded(async () => {
+    const [file] = picker.files
+    if (!file) return
+    const calibration = JSON.parse(await file.text())
+    const response = await send(base() + '/transverse', { revision: revision(), calibration }, 'PUT')
+    chosen.capture.state = response.state
+    await refreshTransverse()
+    notify('Transverse calibration imported.')
+  }))
+  picker.click()
+}
+
+async function removeTransverse() {
+  if (!window.confirm('Remove the transverse calibration from this capture? Measurements revert to the nominal column pitch.')) return
+  const response = await send(base() + '/transverse', { revision: revision() }, 'DELETE')
+  chosen.capture.state = response.state
+  await refreshTransverse()
+  notify('Transverse calibration removed.')
 }
 
 function rulerDefaults() {

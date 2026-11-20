@@ -274,7 +274,6 @@ def create_snapshot(ref):
     section = validate_section(payload["section"])
     return capture_service().save_snapshot(ref, revision, section, label), 201
 
-
 @api.get("/captures/<ref>/snapshots/<snapshot_id>")
 def snapshot(ref, snapshot_id):
     return capture_service().snapshot(ref, snapshot_id)
@@ -291,6 +290,51 @@ def export_snapshot(ref, snapshot_id):
     return stream_attachment(
         payload, f"rollscope-{ref}-snapshot-{snapshot_id}.zip", "application/zip"
     )
+
+
+@api.get("/captures/<ref>/transverse/lines")
+def transverse_lines(ref):
+    return capture_service().ruler_lines(ref)
+
+
+@api.get("/captures/<ref>/transverse")
+def transverse_calibration(ref):
+    return capture_service().calibration_details(ref)
+
+
+@api.post("/captures/<ref>/transverse")
+def build_transverse(ref):
+    data, revision = body(("positions_mm", "accepted_lines"), with_revision=True)
+    positions = data["positions_mm"]
+    if not isinstance(positions, list):
+        raise UserInputError("positions_mm must list one known position per ruler line.")
+    accepted = data["accepted_lines"]
+    if accepted is not None and not isinstance(accepted, list):
+        raise UserInputError("accepted_lines must be a list of ruler line identifiers.")
+    result = capture_service().build_calibration(ref, revision, positions, accepted)
+    result["state"] = result["state"].as_dict()
+    return result, 201
+
+
+@api.put("/captures/<ref>/transverse")
+def import_transverse(ref):
+    data, revision = body(("calibration",), with_revision=True)
+    result = capture_service().import_calibration(ref, revision, data["calibration"])
+    result["state"] = result["state"].as_dict()
+    return result
+
+
+@api.delete("/captures/<ref>/transverse")
+def clear_transverse(ref):
+    _, revision = body((), with_revision=True)
+    result = capture_service().clear_calibration(ref, revision)
+    return {"state": result["state"].as_dict()}
+
+
+@api.get("/captures/<ref>/transverse/export")
+def export_transverse(ref):
+    payload = capture_service().export_calibration(ref)
+    return jsonify(payload)
 
 
 def api_error(error, status, **extra):

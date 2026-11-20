@@ -14,6 +14,7 @@ from .domain import (
     reject_unknown,
 )
 from .settings import AnalysisSettings
+from .transverse import TransverseCalibration
 
 
 MAX_WINDOWS = 40
@@ -75,19 +76,22 @@ class CaptureState:
     windows: tuple
     notes: str
     updated_at: str
+    transverse_calibration: TransverseCalibration | None = None
 
     @classmethod
     def create(cls, timestamp):
-        return cls(0, AnalysisSettings.defaults(), (), "", timestamp)
+        return cls(0, AnalysisSettings.defaults(), (), "", timestamp, None)
 
     @classmethod
     def from_dict(cls, data):
+        calibration = data.get("transverse_calibration")
         return cls(
             data["revision"],
             AnalysisSettings.parse(data["settings"]),
             tuple(ReviewWindow.stored(item) for item in data["windows"]),
             data["notes"],
             data["updated_at"],
+            TransverseCalibration.parse(calibration) if calibration else None,
         )
 
     def as_dict(self):
@@ -97,6 +101,9 @@ class CaptureState:
             "windows": [window.as_dict() for window in self.windows],
             "notes": self.notes,
             "updated_at": self.updated_at,
+            "transverse_calibration": (
+                self.transverse_calibration.as_dict() if self.transverse_calibration else None
+            ),
         }
 
     def settings_patch(self, data):
@@ -110,6 +117,12 @@ class CaptureState:
     def with_notes(self, value):
         notes = clean_text(value, "Capture notes", 4000, True)
         return replace(self, notes=notes)
+
+    def with_transverse_calibration(self, calibration):
+        return replace(self, transverse_calibration=calibration)
+
+    def without_transverse_calibration(self):
+        return replace(self, transverse_calibration=None)
 
     def get_window(self, ref):
         for window in self.windows:

@@ -47,6 +47,7 @@ class StationGrid:
     transverse: np.ndarray
     groups: EncoderGroups
     plan: GridPlan
+    transverse_calibrated: np.ndarray | None = None
 
     @property
     def stations(self):
@@ -62,13 +63,33 @@ class StationGrid:
 
     @property
     def column_pitch_mm(self):
-        return float(self.transverse[1] - self.transverse[0])
+        return float(np.median(np.diff(self.transverse)))
+
+    @property
+    def calibrated_mask(self):
+        if self.transverse_calibrated is None:
+            return np.ones(len(self.transverse), dtype=bool)
+        return self.transverse_calibrated
 
     def summary(self):
         capabilities = {
             support.name.lower(): int(np.count_nonzero(self.plan.support == support.value))
             for support in Support
         }
+        if self.transverse_calibrated is None:
+            calibration = {
+                "transverse_calibrated": False,
+                "calibrated_columns": len(self.transverse),
+                "uncalibrated_columns": 0,
+            }
+        else:
+            calibration = {
+                "transverse_calibrated": True,
+                "calibrated_columns": int(np.count_nonzero(self.transverse_calibrated)),
+                "uncalibrated_columns": int(np.count_nonzero(~self.transverse_calibrated)),
+                "first_calibrated_column": int(np.flatnonzero(self.transverse_calibrated)[0]),
+                "last_calibrated_column": int(np.flatnonzero(self.transverse_calibrated)[-1]),
+            }
         return {
             "stations": len(self.stations),
             "columns": len(self.transverse),
@@ -80,6 +101,7 @@ class StationGrid:
             "valid_fraction": float(np.count_nonzero(self.valid) / self.valid.size),
             "encoder_groups": len(self.groups.ticks),
             "repeated_acquisitions": int(np.sum(self.groups.counts - 1)),
+            **calibration,
         }
 
     def provenance(self, row, column=None):
@@ -190,12 +212,22 @@ def sample_grid(groups, plan):
     return output, valid
 
 
-def build_grid(capture, calibrated, settings):
+def build_grid(capture, calibrated, settings, transverse_calibration=None):
     groups = encoder_groups(capture.ticks, calibrated)
     positions, targets, origin, pitch, limit = grid_coordinates(capture, groups, settings)
     plan = interpolation_plan(positions, targets, origin, pitch, limit)
     values, valid = sample_grid(groups, plan)
-    return StationGrid(values, valid, capture.transverse, groups, plan)
+    if transverse_calibration is None:
+        transverse = capture.transverse
+        calibrated_mask = None
+    else:
+        if transverse_calibration.columns != capture.columns:
+            raise UserInputError(
+                "The transverse calibration was built for a detector with a different column count."
+            )
+        transverse = transverse_calibration.transverse
+        calibrated_mask = transverse_calibration.calibrated
+    return StationGrid(values, valid, transverse, groups, plan, calibrated_mask)
 
 
 def index_near(values, query):

@@ -36,6 +36,9 @@
   }
 }</pre>
     <p>Station is origin plus tick × pitch. Transverse position is origin plus a zero-based column × pitch. Reflection values are dimensionless relative to the dark and white references. The preview applies display scaling; the probe and evidence retain measured values.</p>
+    <h2>Transverse calibration</h2>
+    <p>Import or generate a cross-web ruler photograph as its own capture and open <strong>Transverse calibration</strong>. The workbench detects each dark engraved line, fits its slight tilt in sub-column coordinates, and reports prominence, row coverage, bend and stain evidence. Enter the millimetre value printed beside each line, untick any line whose evidence is weak, and build the calibration.</p>
+    <p>The fit is a weighted, robust curve: a single locally displaced line is flagged as an outlier and excluded so it cannot bend the surrounding widths. The stored mapping is a strictly increasing per-column millimetre curve, reliable only between the outermost accepted lines. Columns outside that span are extrapolated for display and clearly marked uncalibrated in previews, strip geometry and ruler measurements. The probe always shows the original detector column alongside its calibrated millimetre position. Export the calibration as JSON to apply it to another capture from the same camera; a different detector column count is rejected.</p>
     <h2>Review workflow</h2>
     <ol>
       <li>Open the raw scan and check acquisition events. Use Coverage to see gaps and rejected detector columns separately.</li>

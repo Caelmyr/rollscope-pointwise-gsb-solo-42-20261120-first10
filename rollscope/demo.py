@@ -43,6 +43,18 @@ PROFILES = {
         0,
         8016,
     ),
+    "ruler": DemoProfile(
+        "Calibration ruler",
+        "Cross-web ruler / transverse reference",
+        "Synthetic ruler photograph with tilted engraved lines, optical non-linear spacing, "
+        "a stained line and one locally displaced line for transverse calibration.",
+        460,
+        420,
+        0.2,
+        0.3,
+        0,
+        51207,
+    ),
 }
 
 
@@ -183,7 +195,10 @@ def build_demo(name):
     )
     ticks, seconds = encoder_program(profile, rng)
     dark_level, sensitivity, dark, white = references(profile, rng)
-    reflectance = material_pattern(profile, geometry.station(ticks), rng)
+    if name == "ruler":
+        reflectance = ruler_pattern(profile, rng)
+    else:
+        reflectance = material_pattern(profile, geometry.station(ticks), rng)
     raw = np.rint(dark_level + sensitivity * reflectance)
     raw[profile.rows // 2, profile.columns // 2 : profile.columns // 2 + 4] = 65535
     raw = raw.clip(0, 65535).astype(np.uint16)
@@ -191,6 +206,48 @@ def build_demo(name):
         profile.name, profile.material, profile.description, True, geometry
     )
     return Capture.build(raw, ticks, seconds, dark, white, metadata)
+
+
+def ruler_physical_map(profile):
+    """True non-linear optical map: physical ruler mm for each detector column."""
+
+    columns = np.arange(profile.columns, dtype=np.float64)
+    span = (profile.columns - 1) * profile.transverse_pitch
+    nominal = columns * profile.transverse_pitch
+    barrel = 0.018 * span * np.sin(np.pi * columns / (profile.columns - 1))
+    edge_sag = 0.011 * span * (columns / (profile.columns - 1) - 0.5) ** 2
+    return nominal - barrel + edge_sag
+
+
+def ruler_pattern(profile, rng):
+    rows, columns = profile.rows, profile.columns
+    physical = ruler_physical_map(profile)
+    spacing = 14.0
+    margin = 10.0
+    first = float(np.ceil((physical[0] + margin) / spacing) * spacing)
+    last = float(np.floor((physical[-1] - margin) / spacing) * spacing)
+    known = np.arange(first, last + 0.01, spacing)
+    base = 0.62 + 0.03 * np.sin(np.arange(columns) / 27.0)
+    image = np.tile(base, (rows, 1))
+    image += rng.normal(0, 0.004, size=(rows, columns))
+    row_index = np.arange(rows)
+    displaced_index = len(known) // 2
+    stained_index = 2
+    for order, position in enumerate(known):
+        center = np.interp(position, physical, np.arange(columns, dtype=np.float64))
+        slope = rng.uniform(-0.014, 0.014)
+        if order == displaced_index:
+            center += 3.2
+        line_center = center + slope * (row_index - rows / 2)
+        distance = np.arange(columns)[None, :] - line_center[:, None]
+        line = 0.42 * np.exp(-0.5 * (distance / 0.85) ** 2)
+        if order == stained_index:
+            blob_rows = (row_index > rows * 0.58) & (row_index < rows * 0.78)
+            line[blob_rows] *= 0.3
+            smear = np.exp(-0.5 * ((distance - 2.6) / 2.0) ** 2)
+            line[blob_rows] += 0.34 * smear[blob_rows]
+        image -= line
+    return np.clip(image, 0.02, 0.95)
 
 
 def available_demos():

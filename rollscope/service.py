@@ -8,13 +8,18 @@ from .archive import project_export, read_project
 from .capture_codec import read_capture
 from .compare import snapshot_comparison
 from .demo import build_demo
-from .domain import RevisionConflict, UserInputError
+from .domain import MissingRecord, RevisionConflict, UserInputError
 from .evidence import current_package, snapshot_package, window_package
 from .measure_export import export_ruler
 from .probe import cross_section, point_measurement, view_extent
 from .raster import ACQUISITION_LAYERS, RasterSpec, png_bytes, preview_image
 from .ruler import Ruler, evaluate_ruler
 from .records import InspectionSnapshot, ReviewWindow, identifier, utc_now
+from .transverse import (
+    TransverseCalibration,
+    build_transverse_calibration,
+    detect_ruler_lines,
+)
 from .window_review import review_window
 
 
@@ -80,6 +85,7 @@ class CaptureService:
             record.sha256,
             record.capture,
             settings or record.state.settings,
+            record.state.transverse_calibration,
         )
 
     def capture_details(self, ref):
@@ -217,3 +223,90 @@ class CaptureService:
     def export_analysis(self, ref, expected, section):
         record, context = self.configured(ref, expected)
         return current_package(record, context, section)
+
+    def ruler_lines(self, ref):
+        record = self.read(ref)
+        settings = record.state.settings.transverse
+        lines, threshold = detect_ruler_lines(
+            record.capture.raw, settings.minimum_prominence
+        )
+        return {
+            "capture": {
+                "id": record.id,
+                "name": record.capture.metadata.name,
+                "columns": record.capture.columns,
+                "rows": record.capture.rows,
+                "sha256": record.sha256,
+            },
+            "line_count": len(lines),
+            "prominence_threshold": threshold,
+            "lines": [line.as_dict() for line in lines],
+            "existing_calibration": (
+                record.state.transverse_calibration.summary()
+                if record.state.transverse_calibration
+                else None
+            ),
+        }
+
+    def build_calibration(self, ref, expected, positions, accepted_ids):
+        record = self.read(ref, expected)
+        lines, _ = detect_ruler_lines(
+            record.capture.raw,
+            record.state.settings.transverse.minimum_prominence,
+        )
+        source = {
+            "capture_id": record.id,
+            "name": record.capture.metadata.name,
+            "sha256": record.sha256,
+        }
+        calibration = build_transverse_calibration(
+            record.capture.raw, lines, positions, accepted_ids, source
+        )
+        state = self.repository.mutate(
+            ref,
+            expected,
+            lambda current: current.with_transverse_calibration(calibration),
+        )
+        return {"state": state, "calibration": calibration.summary() | {
+            "anchors": calibration.anchor_table(),
+        }}
+
+    def calibration_details(self, ref):
+        record = self.read(ref)
+        calibration = record.state.transverse_calibration
+        if calibration is None:
+            return {"calibration": None}
+        return {
+            "calibration": calibration.summary(),
+            "anchors": calibration.anchor_table(),
+            "rejected_lines": list(calibration.rejected_lines),
+        }
+
+    def export_calibration(self, ref):
+        record = self.read(ref)
+        calibration = record.state.transverse_calibration
+        if calibration is None:
+            raise MissingRecord("This capture has no transverse calibration to export.")
+        return calibration.as_dict()
+
+    def import_calibration(self, ref, expected, payload):
+        record = self.read(ref, expected)
+        calibration = TransverseCalibration.parse(payload)
+        if calibration.columns != record.capture.columns:
+            raise UserInputError(
+                "That calibration was built for a detector with a different column count."
+            )
+        state = self.repository.mutate(
+            ref,
+            expected,
+            lambda current: current.with_transverse_calibration(calibration),
+        )
+        return {"state": state, "calibration": calibration.summary()}
+
+    def clear_calibration(self, ref, expected):
+        state = self.repository.mutate(
+            ref,
+            expected,
+            lambda current: current.without_transverse_calibration(),
+        )
+        return {"state": state}
