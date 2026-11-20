@@ -5,9 +5,20 @@ from enum import Enum
 import numpy as np
 from PIL import Image, ImageDraw
 
+from .blocks import BlockGrid
 from .domain import DISPLAY_HEIGHT, DISPLAY_WIDTH, StationWindow
 from .grid import Support, index_near
 from .numerics import true_runs
+
+
+# Marker colours used when only a minority of a block carries the evidence.
+MARKER_GAP = (96, 105, 168)       # encoder gap / unsupported station
+MARKER_BAD = (196, 110, 184)      # invalid sample inside an observed block
+MARKER_DARK = (255, 169, 88)      # dark anomaly (spot/streak)
+MARKER_BRIGHT = (91, 237, 250)    # bright anomaly (spot/streak)
+# A minority marker never fills its block; minority fractions above this would
+# be painted as the normal block colour instead.
+MINORITY_LIMIT = 0.5
 
 
 class Layer(str, Enum):
@@ -42,6 +53,7 @@ class RasterSpec:
     max_height: int = DISPLAY_HEIGHT
     show_overlays: bool = True
     window: StationWindow | None = None
+    region: StationWindow | None = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +62,7 @@ class RasterMapping:
     columns: slice
     height: int
     width: int
+    block_grid: BlockGrid | None = None
 
     @property
     def row_count(self):
@@ -59,6 +72,10 @@ class RasterMapping:
     def column_count(self):
         return self.columns.stop - self.columns.start
 
+    @property
+    def block_mode(self):
+        return self.block_grid is not None and self.block_grid.downsampled
+
     @classmethod
     def make(cls, shape, max_width, max_height, rows=None, cols=None):
         rows = slice(0, shape[0]) if rows is None else rows
@@ -67,7 +84,10 @@ class RasterMapping:
         in_cols = cols.stop - cols.start
         if in_rows <= 0 or in_cols <= 0:
             raise ValueError("The view has no cells.")
-        return cls(rows, cols, min(in_rows, max_height), min(in_cols, max_width))
+        height = min(in_rows, max_height)
+        width = min(in_cols, max_width)
+        block_grid = BlockGrid.make(rows, cols, max_height, max_width)
+        return cls(rows, cols, height, width, block_grid)
 
     def pixel(self, row, column):
         x = ((column - self.columns.start + 0.5) * self.width / self.column_count) - 0.5
@@ -81,8 +101,22 @@ class RasterMapping:
         row = self.rows.start + (2 * out_row + 1) * self.row_count // (2 * self.height)
         return int(row), int(col)
 
+    def block_at_pixel(self, x, y):
+        """Display pixel coordinates -> block index (block mode only)."""
+        if not self.block_mode:
+            return None
+        block_row = min(self.block_grid.block_rows - 1, int(y * self.height))
+        block_col = min(self.block_grid.block_columns - 1, int(x * self.width))
+        return max(0, block_row), max(0, block_col)
+
+    def block_source_bounds(self, block_row, block_col):
+        """Source row/column ranges covered by one display block."""
+        r0, r1 = self.block_grid.row_bounds(block_row)
+        c0, c1 = self.block_grid.column_bounds(block_col)
+        return slice(r0, r1), slice(c0, c1)
+
     def as_dict(self):
-        return {
+        data = {
             "first_line": self.rows.start,
             "last_line": self.rows.stop - 1,
             "first_column": self.columns.start,
@@ -92,6 +126,15 @@ class RasterMapping:
             "source_width": self.column_count,
             "source_height": self.row_count,
         }
+        if self.block_mode:
+            data.update(
+                block_mode=True,
+                block_rows=self.block_grid.block_rows,
+                block_columns=self.block_grid.block_columns,
+            )
+        else:
+            data["block_mode"] = False
+        return data
 
 
 def scaling_limits(array):
@@ -159,16 +202,28 @@ def coverage_palette(support, valid):
     return image
 
 
+def color_block_unobserved(image, valid, gap_mask):
+    """Block-level equivalent of color_unobserved with 2D block masks."""
+    y, x = np.ogrid[: image.shape[0], : image.shape[1]]
+    patterned = ((x + y) % 8) < 3
+    unknown = ~valid
+    image[unknown] = (47, 31, 43)
+    image[unknown & patterned] = (77, 42, 55)
+    image[gap_mask] = (29, 32, 55)
+    image[gap_mask & patterned] = (63, 68, 106)
+
+
 def position_mapping(context, spec):
     if spec.layer in ACQUISITION_LAYERS:
         return RasterMapping.make(
             context.capture.raw.shape, spec.max_width, spec.max_height
         )
     grid = context.grid
-    if spec.window is None:
+    frame = spec.region or spec.window
+    if frame is None:
         rows = columns = None
     else:
-        rows, columns = spec.window.indices(grid.stations, grid.transverse)
+        rows, columns = frame.indices(grid.stations, grid.transverse)
     return RasterMapping.make(grid.shape, spec.max_width, spec.max_height, rows, columns)
 
 
@@ -207,8 +262,99 @@ def grid_layer(context, indices, row_indices, layer):
     return pixels
 
 
+def _coverage_block_color(facts):
+    """Dominant support category per block, mixed when no category dominates."""
+    total = np.maximum(facts.total_cells, 1)
+    native = facts.native_cells / total
+    blend = facts.blend_cells / total
+    gap = facts.gap_cells / total
+    color_map = np.array(
+        [[36, 39, 71], [64, 146, 127], [78, 101, 145]], dtype=np.float64
+    )
+    image = np.zeros(facts.shape + (3,), dtype=np.float64)
+    image += native[..., None] * color_map[Support.NATIVE]
+    image += blend[..., None] * color_map[Support.BLEND]
+    image += gap[..., None] * color_map[Support.GAP]
+    empty = facts.total_cells == 0
+    image[empty] = color_map[Support.GAP]
+    return np.rint(image).astype(np.uint8)
+
+
+def _minority_positions(fraction):
+    """Blocks whose evidence is present but does not fill the whole block."""
+    return (fraction > 0) & (fraction < MINORITY_LIMIT)
+
+
+def paint_minority_markers(image, facts, layer, context):
+    """Keep sub-cell evidence visible without expanding it to a full block.
+
+    The block colour already carries the median trend.  A block that is only
+    partly unsupported or partly anomalous receives a marker colour instead
+    of the trend colour so a one-cell missing line or a narrow spot survives
+    the reduction.  These markers never replace a block that is mostly
+    unsupported, which keeps broad gaps rendered with their normal colour.
+    """
+    gap_minority = _minority_positions(facts.gap_fraction())
+    bad_minority = _minority_positions(facts.bad_fraction()) & ~gap_minority
+    if np.any(gap_minority):
+        image[gap_minority] = MARKER_GAP
+    if np.any(bad_minority):
+        image[bad_minority] = MARKER_BAD
+
+    if layer in (Layer.SPOTS, Layer.STREAKS):
+        # Only a contrast extreme strong enough to count as an anomaly earns a
+        # marker; weaker residual noise must leave the median trend visible.
+        threshold = (
+            context.settings.spots.contrast
+            if layer == Layer.SPOTS
+            else context.settings.streaks.contrast
+        )
+        mostly_sound = (facts.gap_fraction() < MINORITY_LIMIT) & (
+            facts.bad_fraction() < MINORITY_LIMIT
+        )
+        bright = mostly_sound & (facts.contrast_max >= threshold)
+        dark = mostly_sound & ~bright & (facts.contrast_min <= -threshold)
+        if np.any(bright):
+            image[bright] = MARKER_BRIGHT
+        if np.any(dark):
+            image[dark] = MARKER_DARK
+    return image
+
+
+def block_preview(context, spec, mapping, facts):
+    """Render one display pixel per block, preserving minority evidence."""
+    layer = spec.layer
+    mostly_gap = facts.gap_fraction() >= MINORITY_LIMIT
+    if layer == Layer.COVERAGE:
+        # Coverage already encodes every support category proportionally, so
+        # minority gaps stay their own category colour instead of a marker.
+        image = _coverage_block_color(facts)
+    elif layer in (Layer.SPOTS, Layer.STREAKS):
+        extent = (
+            context.settings.spots.contrast * 2
+            if layer == Layer.SPOTS
+            else context.settings.streaks.contrast * 3
+        )
+        median = np.where(np.isfinite(facts.median), facts.median, 0.0)
+        image = diverging_palette(median, extent)
+        color_block_unobserved(image, facts.valid_fraction() > 0, mostly_gap)
+        image = paint_minority_markers(image, facts, layer, context)
+    else:
+        image = gray_palette(facts.median, 0.02, 0.83)
+        color_block_unobserved(image, facts.valid_fraction() > 0, mostly_gap)
+        image = paint_minority_markers(image, facts, layer, context)
+
+    picture = Image.fromarray(image)
+    if spec.show_overlays:
+        ReviewDrawing(picture, mapping, context).render(layer)
+    return picture
+
+
 def preview_image(context, spec):
     mapping = position_mapping(context, spec)
+    if spec.layer not in ACQUISITION_LAYERS and mapping.block_mode:
+        facts = context.block_facts(spec.layer, mapping.block_grid)
+        return block_preview(context, spec, mapping, facts), mapping
     rows, columns = map_limits(mapping)
     indices = np.ix_(rows, columns)
     if spec.layer in ACQUISITION_LAYERS:

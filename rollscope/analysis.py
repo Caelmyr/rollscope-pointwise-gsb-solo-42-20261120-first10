@@ -37,6 +37,23 @@ class AnalysisContext:
     def __init__(self, capture, settings):
         self.capture = capture
         self.settings = settings
+        self._block_cache = {}
+
+    def block_facts(self, layer, block_grid):
+        from .blocks import reduce_blocks
+
+        key = (
+            layer.value,
+            block_grid.row_edges.tobytes(),
+            block_grid.column_edges.tobytes(),
+        )
+        facts = self._block_cache.get(key)
+        if facts is None:
+            facts = reduce_blocks(self, layer, block_grid)
+            self._block_cache[key] = facts
+            if len(self._block_cache) > 6:
+                self._block_cache.pop(next(iter(self._block_cache)))
+        return facts
 
     @cached_property
     def calibrated(self):

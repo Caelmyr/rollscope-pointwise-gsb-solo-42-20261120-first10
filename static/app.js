@@ -66,13 +66,13 @@ const SETTINGS = {
 }
 
 const LEGEND = {
-  overview: [['reflectance', 'Reflectance'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
+  overview: [['reflectance', 'Reflectance'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample'], ['gapMinor', 'Partial gap in block'], ['badMinor', 'Partial invalid block']],
   sensor: [['reflectance', 'Raw sensor codes']],
   flat: [['reflectance', 'Reflectance'], ['bad', 'Rejected column or pixel']],
   coverage: [['native', 'Native'], ['blend', 'Interpolated'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   edges: [['edge', 'Tracked edge'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
-  spots: [['dark', 'Darker contrast'], ['bright', 'Brighter contrast'], ['gap', 'Encoder gap'], ['bad', 'Excluded area']],
-  streaks: [['dark', 'Dark streak'], ['bright', 'Bright streak'], ['gap', 'Encoder gap'], ['bad', 'Excluded area']],
+  spots: [['dark', 'Darker contrast'], ['bright', 'Brighter contrast'], ['gap', 'Encoder gap'], ['bad', 'Excluded area'], ['gapMinor', 'Partial gap in block'], ['brightMinor', 'Partial anomaly in block']],
+  streaks: [['dark', 'Dark streak'], ['bright', 'Bright streak'], ['gap', 'Encoder gap'], ['bad', 'Excluded area'], ['gapMinor', 'Partial gap in block'], ['brightMinor', 'Partial anomaly in block']],
   marks: [['dark', 'Detected mark'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   splices: [['splice', 'Join candidate'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   texture: [['edge', 'Stripe direction'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
@@ -93,6 +93,7 @@ const chosen = {
   analysis: null,
   extent: null,
   window: '',
+  region: null,
   reviewed: '',
   windowReport: null,
   snapshot: null,
@@ -111,6 +112,8 @@ const regularView = () => !['windows', 'ruler', 'snapshots'].includes(chosen.sec
 const layer = () => VIEW[chosen.section][2]
 const revision = () => chosen.capture.state.revision
 const base = () => '/api/captures/' + chosen.capture.id
+const stationLayers = () => !['sensor', 'flat'].includes(layer())
+const hasPhysicalFrame = () => stationLayers() && (chosen.window !== '' || chosen.region !== null)
 
 async function api(path, options = {}) {
   const response = await fetch(path, options)
@@ -163,6 +166,7 @@ function anchorURL(path, params = {}) {
 function viewParams(extra = {}) {
   const parameters = { layer: layer(), revision: revision(), ...extra }
   if (chosen.window) parameters.window = chosen.window
+  if (chosen.region && stationLayers()) Object.assign(parameters, chosen.region)
   return parameters
 }
 
@@ -204,7 +208,7 @@ async function openCapture(id, reset = true) {
   chosen.capture = detail
   if (reset) {
     Object.assign(chosen, {
-      section: 'overview', tab: 'analysis', window: '', reviewed: '', snapshot: null,
+      section: 'overview', tab: 'analysis', window: '', region: null, reviewed: '', snapshot: null,
       compare: null, probe: null, profile: null, ruler: null, rulerPoints: [],
     })
   }
@@ -255,7 +259,7 @@ async function renderView() {
   const [title, description] = VIEW[chosen.section]
   const raw = layer() === 'sensor' || layer() === 'flat'
   $('#marker').hidden = true
-  $('#window-picker').disabled = raw || chosen.section === 'ruler'
+  $('#window-picker').disabled = raw || chosen.section === 'ruler' || chosen.region !== null
   $('#view-title').textContent = title
   $('#view-subtitle').textContent = description
   $('#axis-y-caption').textContent = raw ? 'ACQUISITION LINE' : 'STATION · MM'
@@ -306,10 +310,48 @@ async function renderView() {
   image.alt = title + ' image'
   $('#empty-image').hidden = true
   $('#grid-size').textContent = `${whole.format(chosen.extent.source_width)} × ${whole.format(chosen.extent.source_height)} cells`
+  if (chosen.section !== 'ruler') {
+    $('#view-footnote').textContent = chosen.extent.block_mode
+      ? 'Select a block to see its station range and partial evidence, then zoom to the source cells.'
+      : 'Select a pixel to inspect its source lines.'
+  }
   paintTicks()
+  updateFrameChrome()
   renderInspector()
   renderTables()
   redrawRuler()
+  redrawFrames()
+}
+
+function updateFrameChrome() {
+  const framed = hasPhysicalFrame()
+  $('#zoom-out-button').hidden = !framed
+  const picker = $('#window-picker')
+  if (chosen.region && stationLayers()) {
+    picker.value = ''
+    picker.disabled = true
+  } else {
+    picker.disabled = layer() === 'sensor' || layer() === 'flat' || chosen.section === 'ruler'
+  }
+}
+
+function resetRegion() {
+  chosen.region = null
+  chosen.window = ''
+  chosen.probe = null
+  updateCaptureChrome()
+  return renderView()
+}
+
+async function zoomToRegion(region) {
+  if (!stationLayers()) return
+  chosen.region = region
+  chosen.window = ''
+  chosen.probe = null
+  updateCaptureChrome()
+  await renderView()
+  $('#viewport').scrollIntoView({ block: 'nearest' })
+  notify('Zoomed to the selected physical frame.')
 }
 
 function spacedTicks(first, last, count) {
@@ -328,8 +370,16 @@ function paintTicks() {
 function activeSection(section) {
   chosen.section = section
   chosen.tab = 'analysis'
-  if (section === 'ruler') chosen.window = ''
-  if (layer() === 'sensor' || layer() === 'flat') chosen.window = ''
+  chosen.probe = null
+  chosen.profile = null
+  if (section === 'ruler') {
+    chosen.window = ''
+    chosen.region = null
+  }
+  if (layer() === 'sensor' || layer() === 'flat') {
+    chosen.window = ''
+    chosen.region = null
+  }
   updateCaptureChrome()
   return renderView()
 }
@@ -504,7 +554,10 @@ async function pick(coords) {
   if (token !== chosen.probeRequest || viewToken !== chosen.request) return
   if (chosen.section === 'ruler') {
     if (chosen.rulerPoints.length >= 2) chosen.rulerPoints = []
-    chosen.rulerPoints.push({ station_mm: outcome.station_mm, transverse_mm: outcome.transverse_mm })
+    chosen.rulerPoints.push({
+      station_mm: outcome.station_mm ?? outcome.station_end_mm,
+      transverse_mm: outcome.transverse_mm ?? outcome.transverse_end_mm,
+    })
     chosen.ruler = null
     if (chosen.rulerPoints.length === 2) await evaluateRuler()
     else {
@@ -526,6 +579,7 @@ function renderProbe(body) {
     body.append(copy('Select a point on the image to see its samples and physical coordinates.'))
     return
   }
+  if (chosen.probe.probe_kind === 'block') return renderBlockProbe(body)
   const result = chosen.probe
   const { lineage } = result
   const values = { ...result }
@@ -551,6 +605,80 @@ function renderProbe(body) {
     }
     body.append(chart(plot))
   }
+}
+
+function evidenceChip(kind, detail) {
+  const tone = kind === 'invalid_sample' || kind === 'dark_anomaly'
+    ? 'bad'
+    : kind === 'spot_footprint' || kind === 'bright_anomaly'
+      ? 'spot'
+      : 'gap'
+  const chip = element('span', null, 'evidence-chip ' + tone)
+  chip.append(element('i'))
+  const labels = {
+    encoder_gap: 'Encoder gap',
+    invalid_sample: 'Invalid sample',
+    dark_anomaly: 'Dark anomaly',
+    bright_anomaly: 'Bright anomaly',
+  }
+  if (kind === 'spot_footprint') {
+    chip.append(document.createTextNode(`Spot footprint · ID ${detail.spot_ids.join(', ')}`))
+  } else {
+    chip.append(document.createTextNode(
+      `${labels[kind]} · ${detail.cells} cells · ${(detail.fraction * 100).toFixed(1)}% of block`
+    ))
+  }
+  return chip
+}
+
+function renderBlockProbe(body) {
+  const result = chosen.probe
+  body.append(title('Low-magnification block'))
+  const banner = element('div', null, 'block-banner')
+  banner.append(
+    element('strong', `Block ${result.block_row}, ${result.block_column}`),
+    document.createTextNode('covers multiple source cells'),
+  )
+  body.append(banner)
+
+  body.append(copy('This thumbnail pixel aggregates the physical frame below. The values summarize its source cells rather than replacing them.'))
+  body.append(keyValues({
+    station_range_mm: `${format(result.station_start_mm)} – ${format(result.station_end_mm)}`,
+    transverse_range_mm: `${format(result.transverse_start_mm)} – ${format(result.transverse_end_mm)}`,
+    source_rows: `${result.source_row_start} – ${result.source_row_end}`,
+    source_columns: `${result.source_column_start} – ${result.source_column_end}`,
+    cells_in_block: result.support.total_cells,
+    valid_cells: result.support.valid_cells,
+    valid_fraction: result.valid_fraction,
+    median_reflectance: result.median_reflectance,
+    minimum_reflectance: result.minimum_reflectance,
+    maximum_reflectance: result.maximum_reflectance,
+  }))
+  if (result.contrast_minimum !== undefined) {
+    body.append(keyValues({
+      contrast_minimum: result.contrast_minimum,
+      contrast_maximum: result.contrast_maximum,
+    }))
+  }
+  body.append(title('Support in block'))
+  body.append(keyValues({
+    native_cells: result.support.native_cells,
+    interpolated_cells: result.support.blend_cells,
+    encoder_gap_cells: result.support.gap_cells,
+    invalid_cells: result.support.invalid_cells,
+  }))
+
+  if (result.partial_evidence.length) {
+    body.append(title('Evidence occupying only part of this block'))
+    const chips = element('div', null, 'field-row')
+    for (const evidence of result.partial_evidence) chips.append(evidenceChip(evidence.kind, evidence))
+    body.append(chips)
+    body.append(copy('These marks survive the reduction but do not fill the block. Zoom in to verify them against the original source cells.'))
+  } else {
+    body.append(copy('No minority evidence: every source cell in this block shares the same support.'))
+  }
+
+  body.append(button('Zoom into this block', guarded(() => zoomToRegion(result.region)), 'button primary small'))
 }
 
 function reviewChoice(item, active, onClick, sublabel) {
@@ -807,6 +935,60 @@ function redrawRuler() {
   }
 }
 
+function frameProjection(region, width, height) {
+  const extent = chosen.extent
+  const x0 = (region.transverse_start_mm - extent.x_from_mm) / (extent.x_to_mm - extent.x_from_mm || 1)
+  const x1 = (region.transverse_end_mm - extent.x_from_mm) / (extent.x_to_mm - extent.x_from_mm || 1)
+  const y0 = (region.station_start_mm - extent.y_from) / (extent.y_to - extent.y_from || 1)
+  const y1 = (region.station_end_mm - extent.y_from) / (extent.y_to - extent.y_from || 1)
+  return {
+    left: Math.max(0, Math.min(1, x0)) * width,
+    right: Math.max(0, Math.min(1, x1)) * width,
+    top: Math.max(0, Math.min(1, y0)) * height,
+    bottom: Math.max(0, Math.min(1, y1)) * height,
+  }
+}
+
+function redrawFrames() {
+  const canvas = $('#frame-layer')
+  const frame = $('#image-frame')
+  const width = canvas.clientWidth
+  const height = canvas.clientHeight
+  const ratio = window.devicePixelRatio || 1
+  canvas.width = Math.round(width * ratio)
+  canvas.height = Math.round(height * ratio)
+  frame.querySelectorAll('.frame-label').forEach((label) => label.remove())
+  const brush = canvas.getContext('2d')
+  brush.scale(ratio, ratio)
+  brush.clearRect(0, 0, width, height)
+  if (!chosen.extent || !stationLayers() || chosen.region || chosen.window) return
+  // Saved review windows are drawn only on the unzoomed physical frame.
+  const windows = chosen.capture?.state.windows || []
+  for (const item of windows) {
+    const box = frameProjection(item.region, width, height)
+    if (box.right <= box.left || box.bottom <= box.top) continue
+    brush.lineWidth = 2
+    brush.strokeStyle = '#72e5cc'
+    brush.setLineDash([7, 5])
+    brush.strokeRect(box.left, box.top, box.right - box.left, box.bottom - box.top)
+    brush.setLineDash([])
+    const label = element('button', item.label, 'frame-label')
+    label.type = 'button'
+    label.title = 'Zoom into this review window'
+    label.style.left = `${(box.left + box.right) / 2}px`
+    label.style.top = `${box.top}px`
+    label.addEventListener('click', guarded(async () => {
+      chosen.region = null
+      chosen.window = item.id
+      chosen.probe = null
+      updateCaptureChrome()
+      await renderView()
+      notify(`Zoomed into review window “${item.label}”.`)
+    }))
+    frame.append(label)
+  }
+}
+
 async function exportRuler() {
   const response = await api(base() + '/ruler/export', {
     method: 'POST',
@@ -873,8 +1055,11 @@ function wireEvents() {
   }))
   $('#window-picker').addEventListener('change', guarded((event) => {
     chosen.window = event.target.value
+    chosen.region = null
+    chosen.probe = null
     return renderView()
   }))
+  $('#zoom-out-button').addEventListener('click', guarded(resetRegion))
   $('#overlay-toggle').addEventListener('change', guarded(renderView))
   $('#detail-tabs').addEventListener('click', (event) => {
     const control = event.target.closest('[data-tab]')
@@ -884,7 +1069,7 @@ function wireEvents() {
   $('#raster').addEventListener('error', () => {
     if ($('#raster').getAttribute('src')) showErrorImage(new Error('Could not load this view.'))
   })
-  window.addEventListener('resize', redrawRuler)
+  window.addEventListener('resize', () => { redrawRuler(); redrawFrames() })
   $('#library-button').addEventListener('click', () => $('#library-dialog').showModal())
   document.querySelectorAll('[data-close]').forEach((control) => {
     control.addEventListener('click', () => document.getElementById(control.dataset.close).close())

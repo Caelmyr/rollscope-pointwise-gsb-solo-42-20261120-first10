@@ -13,6 +13,7 @@ from .demo import available_demos
 from .domain import (
     MissingRecord,
     RevisionConflict,
+    StationWindow,
     UserInputError,
     clean_text,
     exact_keys,
@@ -84,6 +85,33 @@ def layer_argument():
 
 def window_argument():
     return request.args.get("window")
+
+
+REGION_FIELDS = (
+    "station_start_mm",
+    "station_end_mm",
+    "transverse_start_mm",
+    "transverse_end_mm",
+)
+
+
+def region_argument():
+    """Parse an ad-hoc physical frame from query parameters.
+
+    The frame is a transient zoom target rather than a saved window, so it is
+    expressed directly in millimetres and validated by StationWindow.
+    """
+    raw = {name: request.args.get(name) for name in REGION_FIELDS}
+    if all(value is None for value in raw.values()):
+        return None
+    missing = [name for name, value in raw.items() if value is None]
+    if missing:
+        raise UserInputError("A region needs all four physical bounds.")
+    try:
+        bounds = {name: float(raw[name]) for name in REGION_FIELDS}
+    except ValueError as error:
+        raise UserInputError("Region bounds must be numeric.") from error
+    return StationWindow.parse(bounds)
 
 
 def validate_section(section):
@@ -175,7 +203,12 @@ def analysis_export(ref, section):
 def raster(ref):
     overlay = request.args.get("overlay", "1") != "0"
     content, mapping, revision = capture_service().raster(
-        ref, revision_argument(), layer_argument(), overlay, window_argument()
+        ref,
+        revision_argument(),
+        layer_argument(),
+        overlay,
+        window_argument(),
+        region_argument(),
     )
     response = Response(content, mimetype="image/png")
     response.headers["X-Review-Revision"] = str(revision)
@@ -186,7 +219,9 @@ def raster(ref):
 
 @api.get("/captures/<ref>/view")
 def view(ref):
-    return capture_service().view(ref, revision_argument(), layer_argument(), window_argument())
+    return capture_service().view(
+        ref, revision_argument(), layer_argument(), window_argument(), region_argument()
+    )
 
 
 @api.get("/captures/<ref>/probe")
@@ -196,6 +231,7 @@ def probe(ref):
         revision_argument(),
         layer_argument(),
         window_argument(),
+        region_argument(),
         decimal_argument("x", 0, 1),
         decimal_argument("y", 0, 1),
     )
@@ -208,6 +244,7 @@ def profile(ref):
         revision_argument(),
         layer_argument(),
         window_argument(),
+        region_argument(),
         decimal_argument("y", 0, 1),
         points_argument(),
     )

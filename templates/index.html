@@ -73,6 +73,7 @@
           </div>
           <div class="toolbar">
             <select id="window-picker" aria-label="Viewport window"><option value="">Full capture</option></select>
+            <button class="button small" id="zoom-out-button" type="button" hidden>Back to full roll</button>
             <label class="toggle">
               <input type="checkbox" id="overlay-toggle" checked>
               <span>Overlays</span>
@@ -88,6 +89,7 @@
             <div class="empty-image" id="empty-image">Loading capture…</div>
             <div class="marker" id="marker" hidden></div>
             <canvas class="ruler-layer" id="ruler-layer" aria-hidden="true"></canvas>
+            <canvas class="frame-layer" id="frame-layer" aria-hidden="true"></canvas>
           </div>
           <div class="axis-ticks x-ticks" id="axis-x-ticks" aria-hidden="true"></div>
           <div class="x-axis">TRANSVERSE POSITION · MM</div>

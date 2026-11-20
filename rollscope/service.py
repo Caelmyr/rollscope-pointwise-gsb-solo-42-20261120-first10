@@ -140,32 +140,34 @@ class CaptureService:
         window = record.state.get_window(window_id)
         return window_package(record, context, window)
 
-    def render_spec(self, record, layer, overlays, window_id):
-        if window_id is None or layer in ACQUISITION_LAYERS:
+    def render_spec(self, record, layer, overlays, window_id, region=None):
+        if layer in ACQUISITION_LAYERS:
             return RasterSpec(layer, show_overlays=overlays)
-        window = record.state.get_window(window_id)
-        return RasterSpec(layer, show_overlays=overlays, window=window.region)
+        if region is not None:
+            return RasterSpec(layer, show_overlays=overlays, region=region.within(record.capture))
+        frame = record.state.get_window(window_id).region if window_id is not None else None
+        return RasterSpec(layer, show_overlays=overlays, window=frame)
 
-    def raster(self, record_id, expected, layer, overlays, window_id):
+    def raster(self, record_id, expected, layer, overlays, window_id, region=None):
         record, context = self.configured(record_id, expected)
-        spec = self.render_spec(record, layer, overlays, window_id)
+        spec = self.render_spec(record, layer, overlays, window_id, region)
         picture, mapping = preview_image(context, spec)
         return png_bytes(picture), mapping.as_dict(), record.state.revision
 
-    def view(self, record_id, expected, layer, window_id):
+    def view(self, record_id, expected, layer, window_id, region=None):
         record, context = self.configured(record_id, expected)
-        spec = self.render_spec(record, layer, True, window_id)
+        spec = self.render_spec(record, layer, True, window_id, region)
         return view_extent(context, spec) | {"revision": record.state.revision}
 
-    def probe(self, record_id, expected, layer, window_id, x, y):
+    def probe(self, record_id, expected, layer, window_id, region, x, y):
         record, context = self.configured(record_id, expected)
-        spec = self.render_spec(record, layer, True, window_id)
+        spec = self.render_spec(record, layer, True, window_id, region)
         result = point_measurement(context, spec, x, y)
         return result | {"revision": record.state.revision}
 
-    def profile(self, record_id, expected, layer, window_id, y, points):
+    def profile(self, record_id, expected, layer, window_id, region, y, points):
         record, context = self.configured(record_id, expected)
-        spec = self.render_spec(record, layer, True, window_id)
+        spec = self.render_spec(record, layer, True, window_id, region)
         result = cross_section(context, spec, y, points)
         return result | {"revision": record.state.revision}
 
