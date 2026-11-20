@@ -9,7 +9,7 @@ const VIEW = {
   spots: ['Surface spots', 'Candidate footprints against the local material background', 'spots', 'spots'],
   streaks: ['Streaks', 'Longitudinal tracks with sustained local contrast', 'streaks', 'streaks'],
   marks: ['Repeat pitch', 'Dark repeat marks and measured station spacing', 'marks', 'marks'],
-  splices: ['Transverse joins', 'Same-sign contrast across the material width', 'splices', 'splices'],
+  splices: ['Transverse joins', 'Same-sign contrast tracked across stations, including diagonal lines', 'splices', 'splices'],
   texture: ['Texture', 'Stripe direction estimated inside supported material tiles', 'texture', 'texture'],
   illumination: ['Reflectance trend', 'Across-strip and along-roll material reflectance', 'illumination'],
   windows: ['Review windows', 'Saved bounds in physical station coordinates', 'station'],
@@ -59,9 +59,13 @@ const SETTINGS = {
   ],
   splices: [
     ['contrast', 'Minimum join contrast'],
-    ['minimum_fraction', 'Minimum width fraction'],
+    ['minimum_fraction', 'Minimum track width fraction'],
     ['local_scale_mm', 'Local scale (mm)'],
     ['minimum_spacing_mm', 'Minimum spacing (mm)'],
+    ['max_slope', 'Maximum diagonal slope'],
+    ['track_tolerance_mm', 'Tracking tolerance (mm)'],
+    ['max_gap_mm', 'Maximum bridged gap (mm)'],
+    ['minimum_evidence_fraction', 'Minimum evidence fraction'],
   ],
 }
 
@@ -74,7 +78,7 @@ const LEGEND = {
   spots: [['dark', 'Darker contrast'], ['bright', 'Brighter contrast'], ['gap', 'Encoder gap'], ['bad', 'Excluded area']],
   streaks: [['dark', 'Dark streak'], ['bright', 'Bright streak'], ['gap', 'Encoder gap'], ['bad', 'Excluded area']],
   marks: [['dark', 'Detected mark'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
-  splices: [['splice', 'Join candidate'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
+  splices: [['splice', 'Measured join evidence'], ['splice_link', 'Inferred continuation across gap'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   texture: [['edge', 'Stripe direction'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   illumination: [['reflectance', 'Reflectance'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
 }

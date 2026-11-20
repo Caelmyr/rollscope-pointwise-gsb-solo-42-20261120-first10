@@ -256,8 +256,11 @@ class AnalysisPresenter:
         indices = extrema_indices([report.score, report.covered_fraction], self.max_points)
         series = report.series(indices)
         chart = plot("Transverse join score", series, "station_mm", "score", "reflectance")
-        table = result_table("splices", "Join candidates", report.table())
-        return report.summary(), [table], [chart]
+        table = result_table("splices", "Join track segments", report.table())
+        links = result_table(
+            "splice_links", "Join continuation across interruptions", report.links_table()
+        )
+        return report.summary(), [table, links], [chart]
 
     def texture(self):
         report = self.context.texture

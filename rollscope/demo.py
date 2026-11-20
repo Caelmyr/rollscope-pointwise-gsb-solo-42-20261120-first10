@@ -23,7 +23,8 @@ PROFILES = {
         "Cold-rolled steel",
         "Coil R24-071 / side A",
         "Synthetic line scan with two encoder interruptions, repeated ticks, edge wander, "
-        "a rolling streak and a transverse join. It is a simulated inspection capture.",
+        "a rolling streak, a transverse join and a diagonal join crossing an encoder gap. "
+        "It is a simulated inspection capture.",
         1140,
         320,
         0.18,
@@ -145,6 +146,29 @@ def material_pattern(profile, stations, rng):
         bright = np.exp(-0.5 * ((y - join_y + adjustment) / 0.95) ** 2)
         dark = np.exp(-0.5 * ((y - join_y - 2.1 + adjustment) / 1.24) ** 2)
         reflectance += 0.243 * bright - 0.131 * dark
+
+    if profile.material == "Cold-rolled steel":
+        # Diagonal join whose left side arrives several stations before its
+        # right side, crossing the first encoder interruption. The centre of
+        # the straight line only exists across unsampled rows, so continuation
+        # through the gap is inferred rather than measured.
+        material_width = (right - left) * profile.transverse_pitch
+        x_mm = columns * profile.transverse_pitch
+        first_gap = profile.rows // 3
+        gap_station = stations[first_gap]
+        strip_width = float(np.median(material_width))
+        # Left edge of the line sits 30 mm before the gap, right edge 30 mm
+        # after it, giving measured evidence on both sides and a gap in between.
+        start_y = gap_station - stations[0] - 30.0
+        drop = 60.0
+        # ``y`` is relative to the first station, so the line centre must use
+        # the same relative coordinates.
+        diagonal_y = start_y + x_mm * (drop / strip_width)
+        diagonal_bright = np.exp(-0.5 * ((y - diagonal_y) / 2.2) ** 2)
+        diagonal_dark = np.exp(-0.5 * ((y - diagonal_y - 4.2) / 2.4) ** 2)
+        # Kept below the camera's reflectance ceiling so the contrast survives
+        # calibration instead of clipping into the bright saturation band.
+        reflectance += 0.16 * diagonal_bright - 0.1 * diagonal_dark
 
     sensor_noise = rng.normal(0, 0.0029, size=(profile.rows, profile.columns))
     backdrop = 0.084 + 0.017 * np.cos(columns / 31) + 0.007 * np.sin(y / 71)

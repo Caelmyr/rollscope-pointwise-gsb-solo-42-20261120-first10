@@ -31,6 +31,7 @@ CATEGORY_STYLES = {
     "bright": (91, 237, 250),
     "mark": (239, 182, 92),
     "splice": (219, 137, 255),
+    "splice_link": (255, 110, 166),
     "texture": (138, 240, 205),
 }
 
@@ -227,6 +228,27 @@ def png_bytes(image):
     return result.getvalue()
 
 
+def dashed_line(draw, points, fill, width=2, dash=(5, 4)):
+    """Polyline drawn with alternating ink and gaps, used for inferred spans."""
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        length = max(1.0, ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5)
+        steps = max(1, int(length // dash[0]))
+        dx, dy = (x1 - x0) / length, (y1 - y0) / length
+        distance = 0.0
+        ink = True
+        while distance < length:
+            span = min(dash[0] if ink else dash[1], length - distance)
+            if ink:
+                draw.line(
+                    (x0 + dx * distance, y0 + dy * distance,
+                     x0 + dx * (distance + span), y0 + dy * (distance + span)),
+                    fill=fill,
+                    width=width,
+                )
+            distance += span
+            ink = not ink
+
+
 class ReviewDrawing:
     def __init__(self, image, mapping, context):
         self.mapping = mapping
@@ -314,15 +336,66 @@ class ReviewDrawing:
                 self.transverse_mark(mark.station_mm, x0, x1, CATEGORY_STYLES["mark"])
 
     def splices(self):
-        for splice in self.context.splices.splices:
-            self.strip_box(
-                splice.before_mm,
-                splice.after_mm,
-                splice.left_mm,
-                splice.right_mm,
-                CATEGORY_STYLES["splice"],
-                padding=1,
+        report = self.context.splices
+        grid = self.context.grid
+        color = CATEGORY_STYLES["splice"]
+        inferred = CATEGORY_STYLES["splice_link"]
+        for segment, track_id in report.geometry:
+            # Each measured evidence run is drawn as a short transverse tick.
+            for run in segment.runs:
+                y0, x0 = self.mapping.pixel(run.row, run.first_col)
+                y1, x1 = self.mapping.pixel(run.row, run.last_col)
+                if self.mapping.rows.start <= run.row < self.mapping.rows.stop:
+                    self.draw.line((x0, y0, x1, y1), fill=color, width=2)
+            # Fitted straight centreline through the tracked evidence.
+            points = []
+            for row in (segment.first_row, segment.last_row):
+                column = (row - segment.intercept) / segment.slope_row_per_col if (
+                    segment.slope_row_per_col
+                ) else 0.5 * (segment.first_col + segment.last_col)
+                points.append(self.mapping.pixel(row, column))
+            self.draw.line(points, fill=color, width=1)
+
+        # Continuation across unsupported or interrupted stretches is inferred,
+        # never measured: render it dashed along the fitted diagonal and keep
+        # ambiguous joins in a distinct colour.
+        segment_by_track = {}
+        for segment, track_id in report.geometry:
+            segment_by_track.setdefault(track_id, []).append(segment)
+        for link in report.links:
+            pieces = segment_by_track.get(link.track_id, [])
+            before = next(
+                (segment for segment in pieces
+                 if abs(self.context.grid.stations[segment.last_row] - link.station_before_mm)
+                 <= self.context.grid.row_pitch_mm),
+                None,
             )
+            after = next(
+                (segment for segment in pieces
+                 if abs(self.context.grid.stations[segment.first_row] - link.station_after_mm)
+                 <= self.context.grid.row_pitch_mm),
+                None,
+            )
+            start_row = index_near(grid.stations, link.station_before_mm)
+            end_row = index_near(grid.stations, link.station_after_mm)
+            if end_row < self.mapping.rows.start or start_row >= self.mapping.rows.stop:
+                continue
+            if before is not None and after is not None:
+                start_col = (start_row - before.intercept) / before.slope_row_per_col if (
+                    before.slope_row_per_col
+                ) else 0.5 * (before.first_col + before.last_col)
+                end_col = (end_row - after.intercept) / after.slope_row_per_col if (
+                    after.slope_row_per_col
+                ) else 0.5 * (after.first_col + after.last_col)
+            else:
+                column = index_near(grid.transverse, link.transverse_mm)
+                start_col = end_col = column
+            points = [
+                self.mapping.pixel(start_row, start_col),
+                self.mapping.pixel(end_row, end_col),
+            ]
+            stroke = inferred if link.status == "ambiguous" else (178, 150, 232)
+            dashed_line(self.draw, points, stroke, width=2, dash=(5, 4))
 
     def texture(self):
         active = self.context.texture.tiles

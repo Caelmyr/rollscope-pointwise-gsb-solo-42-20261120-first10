@@ -30,7 +30,7 @@ Use `ROLLSCOPE_DATA_DIR` for the data directory and `PORT` for the native server
 - **Surface spots** compares pixels with a local background inside the measured strip. It keeps bright and dark footprints and identifies regions that touch unavailable evidence.
 - **Streaks** tracks persistent dark or bright contrast along the material without joining unsupported stretches of a detector column.
 - **Repeat pitch** finds dark marks in a cross-strip band and measures the observed spacing. An interval crossing unsupported evidence is marked unknown.
-- **Transverse joins** records rows whose same-sign contrast extends across the required fraction of measured material.
+- **Transverse joins** tracks same-sign contrast as straight lines across stations, including diagonal joins whose left side arrives several stations before the right. Each measured fragment keeps its transverse evidence footprint; fragments separated by an encoder gap or unsupported stretch are joined only when polarity, slope and extrapolated position agree. A confident match is marked **continued**, a gap with several plausible matches is left **ambiguous**, and the inferred span is drawn dashed and listed separately from measured evidence. Two close, individually clear lines stay separate, and a seam lying across one station is still detected.
 - **Texture** derives stripe orientation and wavelength bands from complete, detrended, windowed tiles in physical units.
 - **Reflectance trend** summarizes along-roll and cross-strip profiles and a histogram in the valid material interior.
 - **Probe** selects a raster cell and shows its physical coordinates, raw codes and effective source weights. The transverse profile comes from the same selected image row.

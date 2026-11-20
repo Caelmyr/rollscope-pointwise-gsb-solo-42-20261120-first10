@@ -169,16 +169,31 @@ class SpliceSettings:
     minimum_fraction: float = 0.65
     local_scale_mm: float = 4.0
     minimum_spacing_mm: float = 16
+    max_slope: float = 0.5
+    track_tolerance_mm: float = 2.0
+    max_gap_mm: float = 25.0
+    minimum_evidence_fraction: float = 0.35
 
     @classmethod
     def parse(cls, data):
         value = overlay(cls(), data, "Splice settings")
+        slope = finite_number(value["max_slope"], "Maximum join slope", 0.02, 2)
         return cls(
             contrast=finite_number(value["contrast"], "Minimum splice contrast", 0.01, 1),
             minimum_fraction=finite_number(value["minimum_fraction"], "Width fraction", 0.2, 1),
             local_scale_mm=finite_number(value["local_scale_mm"], "Splice scale", 0.1, 75),
             minimum_spacing_mm=finite_number(
                 value["minimum_spacing_mm"], "Minimum splice spacing", 0.1, 5000
+            ),
+            max_slope=slope,
+            track_tolerance_mm=finite_number(
+                value["track_tolerance_mm"], "Join tracking tolerance", 0.2, 50
+            ),
+            max_gap_mm=finite_number(
+                value["max_gap_mm"], "Maximum bridged interruption", 0.5, 500
+            ),
+            minimum_evidence_fraction=finite_number(
+                value["minimum_evidence_fraction"], "Minimum join evidence fraction", 0.1, 1
             ),
         )
 
