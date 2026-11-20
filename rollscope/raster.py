@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .domain import DISPLAY_HEIGHT, DISPLAY_WIDTH, StationWindow
+from .edges import EdgeState
 from .grid import Support, index_near
 from .numerics import true_runs
 
@@ -32,6 +33,9 @@ CATEGORY_STYLES = {
     "mark": (239, 182, 92),
     "splice": (219, 137, 255),
     "texture": (138, 240, 205),
+    "material": (122, 228, 160),
+    "fixed": (154, 168, 245),
+    "unclear": (150, 158, 172),
 }
 
 
@@ -300,6 +304,39 @@ class ReviewDrawing:
                 CATEGORY_STYLES[streak.polarity],
                 padding=2,
             )
+        self.streak_paths()
+
+    def streak_paths(self):
+        complete = self.context.edges.states == EdgeState.COMPLETE
+        for path in self.context.streaks.paths:
+            color = CATEGORY_STYLES[path.alignment]
+            vertices = path.points
+            for (r0, c0), (r1, c1) in zip(vertices, vertices[1:]):
+                self.path_segment(r0, c0, r1, c1, color, complete)
+
+    def path_segment(self, r0, c0, r1, c1, color, complete):
+        if r1 < r0:
+            r0, c0, r1, c1 = r1, c1, r0, c0
+        span = r1 - r0
+        flags = complete[r0 : r1 + 1]
+        offset = 0
+        while offset < len(flags):
+            stop = offset + 1
+            while stop < len(flags) and flags[stop] == flags[offset]:
+                stop += 1
+            if span:
+                a_col = c0 + (c1 - c0) * offset / span
+                b_col = c0 + (c1 - c0) * (stop - 1) / span
+            else:
+                a_col = b_col = c0
+            paint = color if flags[offset] else CATEGORY_STYLES["unclear"]
+            start = self.mapping.pixel(r0 + offset, a_col)
+            end = self.mapping.pixel(r0 + stop - 1, b_col)
+            if start == end:
+                self.draw.point(start, fill=paint)
+            else:
+                self.draw.line((start, end), fill=paint, width=2)
+            offset = stop
 
     def marks(self):
         grid = self.context.grid

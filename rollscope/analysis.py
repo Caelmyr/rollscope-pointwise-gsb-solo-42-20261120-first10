@@ -239,8 +239,11 @@ class AnalysisPresenter:
 
     def streaks(self):
         report = self.context.streaks
-        table = result_table("streaks", "Sustained streaks", report.table())
-        return report.summary(), [table], []
+        tables = [
+            result_table("paths", "Streak trajectories", report.path_table()),
+            result_table("streaks", "Sustained column streaks", report.table()),
+        ]
+        return report.summary(), tables, []
 
     def marks(self):
         report = self.context.marks

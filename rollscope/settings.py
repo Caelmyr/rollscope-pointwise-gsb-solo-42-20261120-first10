@@ -99,6 +99,7 @@ class StreakSettings:
     background_mm: float = 4.0
     minimum_length_mm: float = 30.0
     minimum_coverage: float = 0.85
+    link_gap_mm: float = 30.0
 
     @classmethod
     def parse(cls, data):
@@ -111,6 +112,9 @@ class StreakSettings:
             ),
             minimum_coverage=finite_number(
                 value["minimum_coverage"], "Minimum streak evidence", 0.25, 1
+            ),
+            link_gap_mm=finite_number(
+                value["link_gap_mm"], "Maximum streak link gap", 0, 5000
             ),
         )
 

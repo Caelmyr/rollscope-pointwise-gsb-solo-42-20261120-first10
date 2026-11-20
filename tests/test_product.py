@@ -6,7 +6,7 @@ from zipfile import ZipFile
 
 import numpy as np
 
-from rollscope.analysis import SECTION_TITLES, AnalysisContext
+from rollscope.analysis import SECTION_TITLES, AnalysisContext, AnalysisPresenter
 from rollscope.capture_codec import capture_bytes, capture_hash, read_capture
 from rollscope.demo import build_demo
 from rollscope.grid import Support
@@ -14,6 +14,7 @@ from rollscope.http import create_app
 from rollscope.lineage import station_lineage
 from rollscope.ruler import Ruler, evaluate_ruler
 from rollscope.settings import AnalysisSettings
+from rollscope.streaks import classify_alignment
 
 
 class Numerics(unittest.TestCase):
@@ -69,6 +70,65 @@ class Numerics(unittest.TestCase):
         ).summary()
         self.assertAlmostEqual(result["length_mm"], sum(result["distance_by_support_mm"].values()))
         self.assertGreater(result["distance_by_support_mm"]["gap"], 0)
+
+
+class StreakTrajectories(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.context = AnalysisContext(build_demo("cold-rolled"), AnalysisSettings.defaults())
+
+    def test_alignment_rules(self):
+        self.assertEqual(classify_alignment(8.0, 0.4, 10.0, 0.9), "material")
+        self.assertEqual(classify_alignment(0.4, 8.0, 10.0, 0.9), "fixed")
+        self.assertEqual(classify_alignment(0.4, 0.4, 0.3, 0.9), "unclear")
+        self.assertEqual(classify_alignment(8.0, 0.4, 10.0, 0.3), "unclear")
+        self.assertEqual(classify_alignment(4.0, 4.0, 8.0, 0.9), "unclear")
+
+    def test_material_streak_follows_strip_weave(self):
+        paths = self.context.streaks.path_table()
+        material = [path for path in paths if path["alignment"] == "material"]
+        self.assertTrue(material)
+        for path in material:
+            self.assertGreater(path["strip_motion_mm"], 1.0)
+            self.assertGreater(path["drift_mm"], 0.5)
+
+    def test_camera_locked_streak_stays_on_column(self):
+        paths = self.context.streaks.path_table()
+        fixed = [path for path in paths if path["alignment"] == "fixed"]
+        self.assertTrue(fixed)
+        for path in fixed:
+            self.assertLess(path["drift_mm"], 0.5)
+            self.assertGreater(path["strip_motion_mm"], 1.0)
+
+    def test_paths_break_at_acquisition_gaps(self):
+        gaps = self.context.coverage.gaps
+        self.assertTrue(gaps)
+        for path in self.context.streaks.paths:
+            for gap in gaps:
+                self.assertFalse(
+                    path.from_mm < gap.from_mm and path.to_mm > gap.to_mm,
+                    f"path {path.id} spans acquisition gap {gap.id}",
+                )
+
+    def test_paths_reference_fixed_column_streaks(self):
+        report = self.context.streaks
+        streak_ids = {streak.id for streak in report.streaks}
+        members = set()
+        for path in report.paths:
+            self.assertTrue(path.members)
+            members.update(path.members)
+        self.assertTrue(members)
+        self.assertLessEqual(members, streak_ids)
+
+    def test_streak_section_reports_paths_and_column_tracks(self):
+        output = AnalysisPresenter(self.context).output("streaks")
+        self.assertEqual([table["key"] for table in output["tables"]], ["paths", "streaks"])
+        counts = output["summary"]["paths"]
+        self.assertGreaterEqual(counts["material"], 1)
+        self.assertGreaterEqual(counts["fixed"], 1)
+        self.assertEqual(
+            sum(counts.values()), len(self.context.streaks.paths)
+        )
 
 
 class WorkspaceLifecycle(unittest.TestCase):

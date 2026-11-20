@@ -23,7 +23,8 @@ PROFILES = {
         "Cold-rolled steel",
         "Coil R24-071 / side A",
         "Synthetic line scan with two encoder interruptions, repeated ticks, edge wander, "
-        "a rolling streak and a transverse join. It is a simulated inspection capture.",
+        "a camera-locked rolling streak, a streak that follows the strip weave and a "
+        "transverse join. It is a simulated inspection capture.",
         1140,
         320,
         0.18,
@@ -90,7 +91,7 @@ def references(profile, rng):
 
 def strip_bounds(stations, width):
     relative = stations - stations[0]
-    wander = 4.7 * np.sin(relative / 117) + 1.8 * np.cos(relative / 47)
+    wander = 6.5 * np.sin(relative / 97) + 2.5 * np.cos(relative / 43)
     taper = 2.6 * np.sin(relative / 154.0)
     left = width * 0.111 + wander + taper
     right = width * 0.891 + wander - taper
@@ -121,6 +122,10 @@ def material_pattern(profile, stations, rng):
     first_streak = 0.107 * np.exp(-0.5 * ((x - x.max() * 0.401) / 0.49) ** 2)
     streak_gate = (progress > 0.149) & (progress < 0.66)
     reflectance -= first_streak * streak_gate[:, None]
+    if profile.material == "Cold-rolled steel":
+        weave_streak = 0.088 * np.exp(-0.5 * ((across - 0.27) / 0.011) ** 2)
+        weave_gate = (progress > 0.55) & (progress < 0.93)
+        reflectance -= weave_streak * weave_gate[:, None]
     if profile.material == "Coated aluminum":
         second = 0.078 * np.exp(-0.5 * ((x - x.max() * 0.562) / 0.43) ** 2)
         reflectance += second * (progress > 0.37)[:, None]

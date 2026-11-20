@@ -28,7 +28,7 @@ Use `ROLLSCOPE_DATA_DIR` for the data directory and `PORT` for the native server
 - **Coverage** displays the distinct native, blended, absent and sensor-invalid categories and lists the bracketing raw lines for acquisition gaps.
 - **Strip geometry** follows the supported material span, with a trace for each observed threshold crossing and millimetre width and center measurements. A clipped edge gives an unavailable width.
 - **Surface spots** compares pixels with a local background inside the measured strip. It keeps bright and dark footprints and identifies regions that touch unavailable evidence.
-- **Streaks** tracks persistent dark or bright contrast along the material without joining unsupported stretches of a detector column.
+- **Streaks** tracks persistent dark or bright contrast along the material without joining unsupported stretches of a detector column. Its trajectory view links the fixed-column segments along their measured positions, labels each path as following the strip weave or locked to a detector column, and greys out stretches where clipped or missing edges leave the evidence unclear. Acquisition gaps always stay open, and every path still points back to its source samples.
 - **Repeat pitch** finds dark marks in a cross-strip band and measures the observed spacing. An interval crossing unsupported evidence is marked unknown.
 - **Transverse joins** records rows whose same-sign contrast extends across the required fraction of measured material.
 - **Texture** derives stripe orientation and wavelength bands from complete, detrended, windowed tiles in physical units.
