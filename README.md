@@ -29,7 +29,7 @@ Use `ROLLSCOPE_DATA_DIR` for the data directory and `PORT` for the native server
 - **Strip geometry** follows the supported material span, with a trace for each observed threshold crossing and millimetre width and center measurements. A clipped edge gives an unavailable width.
 - **Surface spots** compares pixels with a local background inside the measured strip. It keeps bright and dark footprints and identifies regions that touch unavailable evidence.
 - **Streaks** tracks persistent dark or bright contrast along the material without joining unsupported stretches of a detector column.
-- **Repeat pitch** finds dark marks in a cross-strip band and measures the observed spacing. An interval crossing unsupported evidence is marked unknown.
+- **Repeat pitch** finds dark marks in a cross-strip band and measures the observed spacing. An interval crossing unsupported evidence is marked unknown. With a second spacing and a minimum stable segment length, a two-segment mode handles one marking-pitch change per roll: it locates the changeover from the detected marks, checks each segment against its own spacing, and reports the changeover as a station range whenever neighbouring explanations tie or a sampling gap hides the transition, instead of counting the changeover as missed marks. Detection uses the smaller spacing in two-segment mode.
 - **Transverse joins** records rows whose same-sign contrast extends across the required fraction of measured material.
 - **Texture** derives stripe orientation and wavelength bands from complete, detrended, windowed tiles in physical units.
 - **Reflectance trend** summarizes along-roll and cross-strip profiles and a histogram in the valid material interior.

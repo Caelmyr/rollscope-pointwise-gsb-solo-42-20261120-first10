@@ -47,6 +47,8 @@ const SETTINGS = {
   ],
   marks: [
     ['expected_spacing_mm', 'Expected mark spacing (mm)'],
+    ['second_spacing_mm', 'Second mark spacing (mm)', 'any', true],
+    ['minimum_segment_mm', 'Minimum stable segment (mm)', '1', true],
     ['minimum_prominence', 'Minimum prominence'],
     ['band_start_fraction', 'Band start (strip width fraction)'],
     ['band_end_fraction', 'Band end (strip width fraction)'],
@@ -73,7 +75,7 @@ const LEGEND = {
   edges: [['edge', 'Tracked edge'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   spots: [['dark', 'Darker contrast'], ['bright', 'Brighter contrast'], ['gap', 'Encoder gap'], ['bad', 'Excluded area']],
   streaks: [['dark', 'Dark streak'], ['bright', 'Bright streak'], ['gap', 'Encoder gap'], ['bad', 'Excluded area']],
-  marks: [['dark', 'Detected mark'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
+  marks: [['dark', 'Detected mark'], ['shift', 'Pitch shift range'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   splices: [['splice', 'Join candidate'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   texture: [['edge', 'Stripe direction'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   illumination: [['reflectance', 'Reflectance'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
@@ -420,8 +422,9 @@ function renderSettings(body) {
   const settings = chosen.capture.state.settings[section]
   const form = element('form')
   if (section === 'grid') form.append(copy('Leave a field empty to use the measured encoder pitch or its automatic gap limit.'))
-  for (const [name, label, step] of SETTINGS[section]) {
-    form.append(field(label, name, settings[name], { type: 'number', step, required: section !== 'grid' }))
+  if (section === 'marks') form.append(copy('Fill in the second spacing and the minimum stable segment to check a roll whose marking pitch changed once. Leave the second spacing empty to check the whole capture against one pitch.'))
+  for (const [name, label, step, optional] of SETTINGS[section]) {
+    form.append(field(label, name, settings[name], { type: 'number', step, required: section !== 'grid' && !optional }))
   }
   const submit = element('button', 'Apply settings', 'button primary small')
   submit.type = 'submit'

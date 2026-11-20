@@ -121,6 +121,8 @@ class MarkSettings:
     minimum_prominence: float = 0.06
     band_start_fraction: float = 0.72
     band_end_fraction: float = 0.9
+    second_spacing_mm: float | None = None
+    minimum_segment_mm: float = 240
 
     @classmethod
     def parse(cls, data):
@@ -129,15 +131,35 @@ class MarkSettings:
         end = finite_number(value["band_end_fraction"], "Mark band end", 0.0, 1)
         if start + 0.01 > end:
             raise UserInputError("The mark band must span at least 1% of the strip width.")
+        expected = finite_number(
+            value["expected_spacing_mm"], "Expected mark spacing", 0.1, 50_000
+        )
+        second = value["second_spacing_mm"]
+        if second is not None:
+            second = finite_number(second, "Second mark spacing", 0.1, 50_000)
+            if second == expected:
+                raise UserInputError(
+                    "The second mark spacing must differ from the expected spacing."
+                )
+        segment = value["minimum_segment_mm"]
+        if segment is None:
+            segment = cls().minimum_segment_mm
+        else:
+            segment = finite_number(segment, "Minimum stable segment", 0, 100_000)
+        if second is not None and segment < max(expected, second):
+            raise UserInputError(
+                "The minimum stable segment must cover at least one interval of the "
+                "larger spacing."
+            )
         return cls(
-            expected_spacing_mm=finite_number(
-                value["expected_spacing_mm"], "Expected mark spacing", 0.1, 50_000
-            ),
+            expected_spacing_mm=expected,
             minimum_prominence=finite_number(
                 value["minimum_prominence"], "Mark prominence", 0.001, 1
             ),
             band_start_fraction=start,
             band_end_fraction=end,
+            second_spacing_mm=second,
+            minimum_segment_mm=segment,
         )
 
 

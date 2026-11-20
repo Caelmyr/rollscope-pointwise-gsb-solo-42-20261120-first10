@@ -30,6 +30,7 @@ CATEGORY_STYLES = {
     "dark": (255, 169, 88),
     "bright": (91, 237, 250),
     "mark": (239, 182, 92),
+    "shift": (240, 98, 120),
     "splice": (219, 137, 255),
     "texture": (138, 240, 205),
 }
@@ -305,13 +306,30 @@ class ReviewDrawing:
         grid = self.context.grid
         edges = self.context.edges
         settings = self.context.settings.marks
-        for mark in self.context.marks.marks:
+        report = self.context.marks
+        for mark in report.marks:
             left = edges.left_mm[mark.row]
             width = edges.width_mm[mark.row]
             x0 = left + settings.band_start_fraction * width
             x1 = left + settings.band_end_fraction * width
             if np.isfinite(x0) and np.isfinite(x1):
                 self.transverse_mark(mark.station_mm, x0, x1, CATEGORY_STYLES["mark"])
+        shift = report.shift
+        if shift is not None:
+            middle = index_near(grid.stations, 0.5 * (shift.from_mm + shift.to_mm))
+            left = edges.left_mm[middle]
+            width = edges.width_mm[middle]
+            if np.isfinite(left) and np.isfinite(width):
+                x0 = left + settings.band_start_fraction * width
+                x1 = left + settings.band_end_fraction * width
+                self.strip_box(
+                    shift.from_mm,
+                    shift.to_mm,
+                    x0,
+                    x1,
+                    CATEGORY_STYLES["shift"],
+                    padding=1,
+                )
 
     def splices(self):
         for splice in self.context.splices.splices:

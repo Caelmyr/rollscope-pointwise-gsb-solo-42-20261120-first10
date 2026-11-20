@@ -6,6 +6,8 @@ from scipy import ndimage
 from .calibration import safe_value, scale_summary
 from .numerics import select_peaks, true_runs
 
+PITCH_TOLERANCE_FRACTION = 0.17
+
 
 @dataclass(frozen=True)
 class Mark:
@@ -15,6 +17,7 @@ class Mark:
     prominence: float
     support_fraction: float
     segment: int
+    pitch_group: str | None = None
 
     def as_dict(self):
         return asdict(self)
@@ -28,9 +31,23 @@ class MarkInterval:
     to_mm: float
     measured_mm: float
     classification: str
-    expected_mm: float
+    expected_mm: float | None
     error_mm: float | None
     inferred_missing_marks: int
+
+    def as_dict(self):
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class MarkShift:
+    first_spacing_mm: float
+    second_spacing_mm: float
+    from_mm: float
+    to_mm: float
+    transition_intervals: int
+    misfit_intervals: int
+    minimum_segment_mm: float
 
     def as_dict(self):
         return asdict(self)
@@ -44,20 +61,58 @@ class MarkReport:
     support: np.ndarray
     marks: tuple
     intervals: tuple
+    mode: str = "single_pitch"
+    shift: MarkShift | None = None
 
     def summary(self):
         accepted = [interval for interval in self.intervals if interval.classification == "regular"]
-        return {
+        result = {
+            "mode": self.mode,
             "mark_count": len(self.marks),
             "interval_count": len(self.intervals),
             "regular_intervals": len(accepted),
             "sampled_rows": int(np.count_nonzero(np.isfinite(self.darkness))),
-            "spacing_mm": scale_summary([interval.measured_mm for interval in accepted]),
             "missed_candidates": sum(item.inferred_missing_marks for item in self.intervals),
             "unknown_intervals": sum(
                 item.classification == "unknown_across_gap" for item in self.intervals
             ),
         }
+        if self.mode == "single_pitch":
+            result["spacing_mm"] = scale_summary(
+                [interval.measured_mm for interval in accepted]
+            )
+            return result
+        result["shift_intervals"] = sum(
+            item.classification == "shift_transition" for item in self.intervals
+        )
+        if self.shift is None:
+            result["shift_status"] = "undetermined"
+            return result
+        shift = self.shift
+        first = [
+            interval.measured_mm
+            for interval in accepted
+            if interval.expected_mm == shift.first_spacing_mm
+        ]
+        second = [
+            interval.measured_mm
+            for interval in accepted
+            if interval.expected_mm == shift.second_spacing_mm
+        ]
+        result.update(
+            {
+                "shift_status": "located",
+                "first_spacing_mm": shift.first_spacing_mm,
+                "second_spacing_mm": shift.second_spacing_mm,
+                "shift_from_mm": shift.from_mm,
+                "shift_to_mm": shift.to_mm,
+                "misfit_intervals": shift.misfit_intervals,
+                "minimum_segment_mm": shift.minimum_segment_mm,
+                "first_segment_spacing_mm": scale_summary(first),
+                "second_segment_spacing_mm": scale_summary(second),
+            }
+        )
+        return result
 
     def series(self, indices):
         return [
@@ -130,7 +185,7 @@ def classify_interval(current, following, expected):
         multiples = max(1, int(round(distance / expected)))
         error = float(distance - multiples * expected)
         missing = 0
-        tolerance = expected * 0.17
+        tolerance = expected * PITCH_TOLERANCE_FRACTION
         if abs(error) > tolerance:
             category = "irregular"
         elif multiples > 1:
@@ -151,29 +206,177 @@ def classify_interval(current, following, expected):
     )
 
 
-def inspect_marks(grid, edges, settings):
+def unjudged_interval(current, following, classification):
+    return MarkInterval(
+        current.id,
+        following.id,
+        current.station_mm,
+        following.station_mm,
+        following.station_mm - current.station_mm,
+        classification,
+        None,
+        None,
+        0,
+    )
+
+
+def pitch_fits(distances, pitch):
+    tolerance = PITCH_TOLERANCE_FRACTION * pitch
+    multiples = np.maximum(1, np.rint(distances / pitch).astype(np.int64))
+    return np.abs(distances - multiples * pitch) <= tolerance
+
+
+def locate_shift(stations, spacings, minimum_segment_mm):
+    """Place the single pitch change that best explains the observed marks.
+
+    Every candidate split treats one interval as the changeover and scores the
+    remaining intervals against the segment pitch on their side. Splits that
+    tie at the lowest misfit count are all kept, so the changeover stays a
+    range whenever neighbouring explanations fit equally well. Returns the
+    winning (first, second) pitch assignment, the plausible split positions
+    and the misfit count, or None when no split leaves both segments at least
+    minimum_segment_mm of observed marks.
+    """
+    stations = np.asarray(stations, dtype=np.float64)
+    count = len(stations)
+    if count < 2:
+        return None
+    distances = np.diff(stations)
+    fits = {pitch: pitch_fits(distances, pitch) for pitch in set(spacings)}
+    first_span = stations[:-1] - stations[0]
+    second_span = stations[-1] - stations[1:]
+    feasible = (first_span >= minimum_segment_mm - 1e-9) & (
+        second_span >= minimum_segment_mm - 1e-9
+    )
+    best = None
+    assignments = ((spacings[0], spacings[1]), (spacings[1], spacings[0]))
+    for order, assignment in enumerate(assignments):
+        first_miss = np.concatenate(([0], np.cumsum(~fits[assignment[0]])))
+        second_miss = np.concatenate(([0], np.cumsum(~fits[assignment[1]])))
+        costs = first_miss[:-1] + (second_miss[-1] - second_miss[1:])
+        viable = np.flatnonzero(feasible)
+        if not len(viable):
+            continue
+        low = int(np.min(costs[viable]))
+        plausible = [int(split) for split in viable if costs[split] == low]
+        candidate = (low, len(plausible), order, assignment, plausible)
+        if best is None or candidate[:3] < best[:3]:
+            best = candidate
+    if best is None:
+        return None
+    low, _, _, assignment, plausible = best
+    return assignment, plausible, low
+
+
+def segment_pitch_groups(mark_count, plausible):
+    first_split = plausible[0]
+    last_split = plausible[-1]
+    groups = []
+    for index in range(mark_count):
+        if index <= first_split:
+            groups.append("first")
+        elif index > last_split:
+            groups.append("second")
+        else:
+            groups.append("shift")
+    return groups
+
+
+def two_segment_intervals(marks, assignment, plausible):
+    first_split = plausible[0]
+    last_split = plausible[-1]
+    intervals = []
+    for position, (current, following) in enumerate(zip(marks, marks[1:])):
+        if position < first_split:
+            intervals.append(classify_interval(current, following, assignment[0]))
+        elif position > last_split:
+            intervals.append(classify_interval(current, following, assignment[1]))
+        else:
+            intervals.append(unjudged_interval(current, following, "shift_transition"))
+    return tuple(intervals)
+
+
+def detect_marks(grid, edges, settings, detection_pitch):
     darkness, support = band_measurements(
         grid, edges, settings.band_start_fraction, settings.band_end_fraction
     )
     residual, segments = prominence_by_segment(
-        darkness, ~grid.plan.observed, grid.row_pitch_mm, settings.expected_spacing_mm
+        darkness, ~grid.plan.observed, grid.row_pitch_mm, detection_pitch
     )
-    separation = int(np.clip(round(0.55 * settings.expected_spacing_mm / grid.row_pitch_mm), 1, 2000))
+    separation = int(np.clip(round(0.55 * detection_pitch / grid.row_pitch_mm), 1, 2000))
     eligible = np.isfinite(residual) & (residual >= settings.minimum_prominence)
     peaks = select_peaks(residual, eligible, separation)
-    marks = tuple(
-        Mark(
-            identifier,
-            peak.index,
-            float(grid.stations[peak.index]),
-            peak.prominence,
-            float(support[peak.index]),
-            int(segments[peak.index]),
+    return darkness, support, residual, segments, peaks
+
+
+def build_marks(grid, support, segments, peaks, pitch_groups=None):
+    marks = []
+    for position, peak in enumerate(peaks):
+        marks.append(
+            Mark(
+                position + 1,
+                peak.index,
+                float(grid.stations[peak.index]),
+                peak.prominence,
+                float(support[peak.index]),
+                int(segments[peak.index]),
+                None if pitch_groups is None else pitch_groups[position],
+            )
         )
-        for identifier, peak in enumerate(peaks, 1)
+    return tuple(marks)
+
+
+def inspect_marks(grid, edges, settings):
+    second = settings.second_spacing_mm
+    detection_pitch = settings.expected_spacing_mm
+    if second is not None:
+        detection_pitch = min(detection_pitch, second)
+    darkness, support, residual, segments, peaks = detect_marks(
+        grid, edges, settings, detection_pitch
     )
-    intervals = tuple(
-        classify_interval(current, following, settings.expected_spacing_mm)
-        for current, following in zip(marks, marks[1:])
+    if second is None:
+        marks = build_marks(grid, support, segments, peaks)
+        intervals = tuple(
+            classify_interval(current, following, settings.expected_spacing_mm)
+            for current, following in zip(marks, marks[1:])
+        )
+        return MarkReport(grid.stations, darkness, residual, support, marks, intervals)
+
+    stations = np.array([float(grid.stations[peak.index]) for peak in peaks])
+    outcome = locate_shift(
+        stations,
+        (settings.expected_spacing_mm, second),
+        settings.minimum_segment_mm,
     )
-    return MarkReport(grid.stations, darkness, residual, support, marks, intervals)
+    if outcome is None:
+        marks = build_marks(grid, support, segments, peaks)
+        intervals = tuple(
+            unjudged_interval(current, following, "undetermined")
+            for current, following in zip(marks, marks[1:])
+        )
+        return MarkReport(
+            grid.stations, darkness, residual, support, marks, intervals, mode="two_segment"
+        )
+    assignment, plausible, misfits = outcome
+    groups = segment_pitch_groups(len(peaks), plausible)
+    marks = build_marks(grid, support, segments, peaks, groups)
+    intervals = two_segment_intervals(marks, assignment, plausible)
+    shift = MarkShift(
+        assignment[0],
+        assignment[1],
+        float(stations[plausible[0]]),
+        float(stations[plausible[-1] + 1]),
+        plausible[-1] - plausible[0] + 1,
+        misfits,
+        settings.minimum_segment_mm,
+    )
+    return MarkReport(
+        grid.stations,
+        darkness,
+        residual,
+        support,
+        marks,
+        intervals,
+        mode="two_segment",
+        shift=shift,
+    )

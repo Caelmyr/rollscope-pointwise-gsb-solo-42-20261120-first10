@@ -249,7 +249,10 @@ class AnalysisPresenter:
         chart = plot("Mark prominence", series, "station_mm", "prominence", "reflectance")
         marks = result_table("marks", "Detected marks", report.table())
         pitches = result_table("pitch", "Measured repeat intervals", report.intervals_table())
-        return report.summary(), [marks, pitches], [chart]
+        tables = [marks, pitches]
+        if report.shift is not None:
+            tables.append(result_table("shift", "Pitch shift range", [report.shift.as_dict()]))
+        return report.summary(), tables, [chart]
 
     def splices(self):
         report = self.context.splices
