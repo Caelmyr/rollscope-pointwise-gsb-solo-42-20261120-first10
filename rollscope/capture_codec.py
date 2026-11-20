@@ -20,6 +20,12 @@ NPZ_SPEC = {
     "white": ("iu", ((1, MAX_REFERENCE_ROWS), (16, MAX_COLS))),
     "metadata_utf8": ("u", ((2, MAX_METADATA_BYTES),)),
 }
+OPTIONAL_NPZ_SPEC = {
+    "dark_end": ("iu", ((1, MAX_REFERENCE_ROWS), (16, MAX_COLS))),
+    "white_end": ("iu", ((1, MAX_REFERENCE_ROWS), (16, MAX_COLS))),
+    "reference_seconds": ("iuf", ((1, 2),)),
+}
+REQUIRED_NAMES = {f"{name}.npy" for name in NPZ_SPEC}
 
 
 def canonical_json(document):
@@ -41,23 +47,32 @@ def read_metadata(array):
 def read_capture(payload):
     if len(payload) > MAX_BUNDLE_BYTES:
         raise UserInputError("The scan bundle exceeds 48 MiB.")
-    expected_names = [f"{name}.npy" for name in NPZ_SPEC]
     values = {}
     try:
         with ZipFile(io.BytesIO(payload)) as archive:
-            if sorted(archive.namelist()) != sorted(expected_names):
+            names = set(archive.namelist())
+            if not REQUIRED_NAMES.issubset(names):
                 raise UserInputError(
                     "The bundle must contain raw, ticks, seconds, dark, white and metadata_utf8."
                 )
+            extras = names - REQUIRED_NAMES - {
+                f"{name}.npy" for name in OPTIONAL_NPZ_SPEC
+            }
+            if extras:
+                raise UserInputError("The bundle contains unsupported array members.")
             for key, (kinds, dimensional_limits) in NPZ_SPEC.items():
                 member = archive.getinfo(f"{key}.npy")
                 values[key] = read_npy(archive, member, kinds, dimensional_limits)
+            for key, (kinds, dimensional_limits) in OPTIONAL_NPZ_SPEC.items():
+                if f"{key}.npy" in names:
+                    member = archive.getinfo(f"{key}.npy")
+                    values[key] = read_npy(archive, member, kinds, dimensional_limits)
     except UserInputError:
         raise
     except (BadZipFile, ValueError, EOFError, RuntimeError, OverflowError, OSError) as error:
         raise UserInputError("The input is not a supported NumPy capture bundle.") from error
     metadata = read_metadata(values.pop("metadata_utf8"))
-    return Capture.build(**values, metadata=metadata)
+    return Capture.build(metadata=metadata, **values)
 
 
 def read_npy(archive, member, supported_kinds, dimensions):
@@ -93,7 +108,7 @@ def read_npy(archive, member, supported_kinds, dimensions):
 
 
 def capture_arrays(capture):
-    return {
+    arrays = {
         "raw": capture.raw,
         "ticks": capture.ticks,
         "seconds": capture.seconds,
@@ -103,6 +118,13 @@ def capture_arrays(capture):
             canonical_json(capture.metadata.as_dict()), dtype=np.uint8
         ),
     }
+    if capture.paired_references:
+        arrays["dark_end"] = capture.dark_end
+        arrays["white_end"] = capture.white_end
+        arrays["reference_seconds"] = np.asarray(
+            capture.reference_event_seconds(), dtype=np.float64
+        )
+    return arrays
 
 
 def capture_bytes(capture):

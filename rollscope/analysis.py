@@ -11,7 +11,7 @@ from .illumination import measure_illumination
 from .marks import inspect_marks
 from .motion import infer_motion, motion_values
 from .presentation import extrema_indices
-from .reference_passes import report_reference_passes
+from .reference_passes import basis_series, report_reference_passes
 from .splices import inspect_splices
 from .spots import detect_spots
 from .streaks import measure_streaks
@@ -105,8 +105,8 @@ def result_table(key, title, records):
     return {"key": key, "title": title, "rows": records}
 
 
-def plot(title, records, x, y, unit, secondary=()):
-    metrics = (y, *secondary)
+def plot(title, records, x, y, unit, secondary=None):
+    metrics = (y, *(secondary or ()))
     return {
         "title": title,
         "x": x,
@@ -172,33 +172,57 @@ class AnalysisPresenter:
         return report.summary, [table, segments], charts
 
     def flat(self):
-        calibrated = self.context.calibrated
-        columns = calibrated.reference.column_records(self.context.capture.transverse)
-        faults = [column for column in columns if not column["valid"]]
+        context = self.context
+        calibrated = context.calibrated
+        columns = list(calibrated.paired_column_records(context.capture.transverse))
+        faults = [
+            column
+            for column in columns
+            if not column["start_valid"]
+            or (calibrated.paired and not column["end_valid"])
+        ]
         behavior, pass_stats, reference_drift = report_reference_passes(
-            self.context.capture, calibrated.reference, self.context.settings.calibration
+            context.capture, calibrated, context.settings.calibration
         )
         charts = [
-            plot("Dark-to-white response", columns, "transverse_mm", "response_code", "ADU"),
+            plot("Reference response by event", columns, "transverse_mm",
+                 "start_response_code", "ADU",
+                 ("end_response_code",) if calibrated.paired else None),
             plot(
                 "Reference variation",
-                columns,
+                calibrated.reference.column_records(context.capture.transverse),
                 "transverse_mm",
                 "white_noise_code",
                 "ADU",
                 ("dark_noise_code",),
             ),
         ]
-        charts.append(
-            plot(
-                "Reference drift across passes",
-                reference_drift,
-                "transverse_mm",
-                "white_drift_code",
-                "ADU",
-                ("dark_drift_code",),
+        if calibrated.paired:
+            charts.append(
+                plot(
+                    "Start-to-end reference drift",
+                    reference_drift,
+                    "transverse_mm",
+                    "white_drift_code",
+                    "ADU",
+                    ("dark_drift_code",),
+                )
             )
-        )
+            basis_rows = basis_series(calibrated, context.capture.stations)
+            indices = extrema_indices(
+                [[row["station_mm"] for row in basis_rows]], self.max_points
+            )
+            basis_rows = [basis_rows[index] for index in indices]
+            charts.append(
+                plot(
+                    "Reference basis along the scan",
+                    basis_rows,
+                    "station_mm",
+                    "blended",
+                    "columns",
+                    ("start", "end", "unknown"),
+                )
+            )
         tables = [
             result_table("flagged_columns", "Flagged detector columns", faults),
             result_table("dark_passes", "Dark reference passes", pass_stats["dark"]),

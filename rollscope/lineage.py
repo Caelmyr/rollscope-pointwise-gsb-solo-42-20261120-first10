@@ -14,6 +14,7 @@ def source_details(context, group, weight, column, contributes):
     details = []
     for offset, source in enumerate(indices):
         valid = eligible[offset]
+        start_weight, end_weight = corrected.reference_weights(source, column)
         details.append(
             {
                 "source_line": int(source),
@@ -21,6 +22,9 @@ def source_details(context, group, weight, column, contributes):
                 "encoder_tick": int(capture.ticks[source]),
                 "sensor_code": int(capture.raw[source, column]),
                 "reflectance": safe_value(corrected.values[source, column]),
+                "reference_basis": corrected.basis_name(source, column),
+                "start_reference_weight": start_weight,
+                "end_reference_weight": end_weight,
                 "group_weight": weight,
                 "effective_weight": effective_share if valid else 0.0,
                 "usable": bool(valid),
@@ -59,6 +63,7 @@ def acquisition_context(context, source_line, column, radius):
     for index in range(start, stop):
         station = float(stations[index])
         output_row = index_near(context.grid.stations, station)
+        start_weight, end_weight = corrected.reference_weights(index, column)
         result.append(
             {
                 "source_line": index,
@@ -67,6 +72,9 @@ def acquisition_context(context, source_line, column, radius):
                 "time_s": float(capture.seconds[index]),
                 "sensor_code": int(capture.raw[index, column]),
                 "reflectance": safe_value(corrected.values[index, column]),
+                "reference_basis": corrected.basis_name(index, column),
+                "start_reference_weight": start_weight,
+                "end_reference_weight": end_weight,
                 "nearest_station_row": output_row,
                 "selected_source": index == source_line,
             }

@@ -115,7 +115,7 @@ class Evidence:
 
 def grid_payload(context, cells):
     grid = context.grid
-    return npz_bytes(
+    payload = dict(
         reflectance=cells.values,
         valid=cells.valid,
         material=cells.material,
@@ -125,6 +125,11 @@ def grid_payload(context, cells):
         row_pitch_mm=np.float64(grid.row_pitch_mm),
         column_pitch_mm=np.float64(grid.column_pitch_mm),
     )
+    calibrated = context.calibrated
+    if calibrated.paired:
+        payload["reference_basis"] = calibrated.basis[cells.rows, cells.columns].astype(np.uint8)
+        payload["transition_fraction"] = calibrated.transition[cells.rows].astype(np.float32)
+    return npz_bytes(**payload)
 
 
 def source_payload(context, cells, lines):
@@ -132,15 +137,25 @@ def source_payload(context, cells, lines):
     selection = np.array([record["source_line"] for record in lines], dtype=np.int64)
     columns = cells.columns
     selected_columns = np.arange(columns.start, columns.stop, dtype=np.int64)
-    return npz_bytes(
-        capture_lines=selection,
-        capture_columns=selected_columns,
-        raw=capture.raw[selection, columns],
-        ticks=capture.ticks[selection],
-        seconds=capture.seconds[selection],
-        dark=capture.dark[:, columns],
-        white=capture.white[:, columns],
-    )
+    payload = {
+        "capture_lines": selection,
+        "capture_columns": selected_columns,
+        "raw": capture.raw[selection, columns],
+        "ticks": capture.ticks[selection],
+        "seconds": capture.seconds[selection],
+        "dark": capture.dark[:, columns],
+        "white": capture.white[:, columns],
+    }
+    if capture.paired_references:
+        payload["dark_end"] = capture.dark_end[:, columns]
+        payload["white_end"] = capture.white_end[:, columns]
+        payload["reference_seconds"] = np.asarray(
+            capture.reference_event_seconds(), dtype=np.float64
+        )
+        calibrated = context.calibrated
+        payload["reference_basis"] = calibrated.basis[selection, columns].astype(np.uint8)
+        payload["transition_fraction"] = calibrated.transition[selection].astype(np.float32)
+    return npz_bytes(**payload)
 
 
 def window_package(record, context, window):

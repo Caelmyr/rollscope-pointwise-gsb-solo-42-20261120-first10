@@ -16,6 +16,7 @@ class DemoProfile:
     transverse_pitch: float
     station_origin: float
     seed: int
+    paired_references: bool = True
 
 
 PROFILES = {
@@ -80,12 +81,30 @@ def references(profile, rng):
     white = black_level + sensitivity + rng.normal(0, 35, size=(11, profile.columns))
     noise_pattern = np.array([-600, 340, -530, 590, -580, 490, 630, -480, 380, 570, -320])
     white[:, profile.columns // 5] += noise_pattern
-    return (
-        black_level,
-        sensitivity,
+    start = (
         np.rint(dark).clip(0, 65535).astype(np.uint16),
         np.rint(white).clip(0, 65535).astype(np.uint16),
     )
+    if not profile.paired_references:
+        return black_level, sensitivity, start, None, None
+
+    # After the lamp has heated: black level rises slightly and the white
+    # response drifts column-by-column, changing measured brightness on the
+    # same material between the two reference events.
+    warm_dark = black_level + 26 + 11 * np.sin(position / 47.0)
+    warm_sensitivity = sensitivity * (1 + 0.028 * np.sin(position / 91.0 + 0.8)) + 480
+    dark_end = warm_dark + rng.normal(0, 12, size=(9, profile.columns))
+    white_end = warm_dark + warm_sensitivity + rng.normal(0, 35, size=(11, profile.columns))
+    white_end[:, profile.columns // 5] += noise_pattern
+    # One column saturates only at the end event; another goes weak there.
+    white_end[:, 64] = 65535
+    weak_end = max(0, profile.columns - 18)
+    white_end[:, weak_end] = np.rint(warm_dark[weak_end] + 240)
+    end = (
+        np.rint(dark_end).clip(0, 65535).astype(np.uint16),
+        np.rint(white_end).clip(0, 65535).astype(np.uint16),
+    )
+    return black_level, sensitivity, start, end
 
 
 def strip_bounds(stations, width):
@@ -182,7 +201,8 @@ def build_demo(name):
         0.0,
     )
     ticks, seconds = encoder_program(profile, rng)
-    dark_level, sensitivity, dark, white = references(profile, rng)
+    dark_level, sensitivity, start_references, end_references = references(profile, rng)
+    dark, white = start_references
     reflectance = material_pattern(profile, geometry.station(ticks), rng)
     raw = np.rint(dark_level + sensitivity * reflectance)
     raw[profile.rows // 2, profile.columns // 2 : profile.columns // 2 + 4] = 65535
@@ -190,7 +210,16 @@ def build_demo(name):
     metadata = CaptureMetadata(
         profile.name, profile.material, profile.description, True, geometry
     )
-    return Capture.build(raw, ticks, seconds, dark, white, metadata)
+    if end_references is None:
+        return Capture.build(raw, ticks, seconds, dark, white, metadata)
+    dark_end, white_end = end_references
+    reference_seconds = np.array(
+        [float(seconds[0]) - 0.85, float(seconds[-1]) + 0.85], dtype=np.float64
+    )
+    return Capture.build(
+        raw, ticks, seconds, dark, white, metadata,
+        dark_end=dark_end, white_end=white_end, reference_seconds=reference_seconds,
+    )
 
 
 def available_demos():

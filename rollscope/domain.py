@@ -173,21 +173,59 @@ class Capture:
     dark: np.ndarray
     white: np.ndarray
     metadata: CaptureMetadata
+    dark_end: np.ndarray | None = None
+    white_end: np.ndarray | None = None
+    reference_seconds: np.ndarray | None = None
 
     @classmethod
-    def build(cls, raw, ticks, seconds, dark, white, metadata):
+    def build(cls, raw, ticks, seconds, dark, white, metadata, dark_end=None, white_end=None,
+              reference_seconds=None):
         metadata = CaptureMetadata.parse(metadata.as_dict())
         raw = counter_image(raw, "Scan image", 8, MAX_ROWS)
         ticks = encoder_vector(ticks, raw.shape[0])
         seconds = clock_vector(seconds, raw.shape[0])
         dark = reference_image(dark, raw.shape[1], "Dark reference")
         white = reference_image(white, raw.shape[1], "White reference")
+        paired = dark_end is not None or white_end is not None
+        if paired:
+            if dark_end is None or white_end is None:
+                raise UserInputError(
+                    "Paired references require both an end-of-roll dark and white pass set."
+                )
+            dark_end = reference_image(dark_end, raw.shape[1], "End dark reference")
+            white_end = reference_image(white_end, raw.shape[1], "End white reference")
+        else:
+            dark_end = None
+            white_end = None
+        reference_seconds = reference_clock(reference_seconds, paired)
         s_min, s_max = metadata.geometry.station(ticks[[0, -1]])
         if (s_max - s_min) > 100_000:
             raise UserInputError("A capture may span at most 100,000 mm.")
         if max(abs(s_min), abs(s_max)) > 1e8:
             raise UserInputError("Station coordinates must be within ±100,000,000 mm.")
-        return cls(raw, ticks, seconds, dark, white, metadata)
+        return cls(raw, ticks, seconds, dark, white, metadata, dark_end, white_end,
+                   reference_seconds)
+
+    @property
+    def paired_references(self):
+        return self.dark_end is not None and self.white_end is not None
+
+    def reference_sets(self):
+        """Return (dark_sets, white_sets); one entry per timed reference event."""
+        if self.paired_references:
+            dark_sets = (self.dark, self.dark_end)
+            white_sets = (self.white, self.white_end)
+        else:
+            dark_sets = (self.dark,)
+            white_sets = (self.white,)
+        return dark_sets, white_sets
+
+    def reference_event_seconds(self):
+        if self.reference_seconds is not None:
+            return tuple(float(value) for value in self.reference_seconds)
+        if self.paired_references:
+            return (float(self.seconds[0]), float(self.seconds[-1]))
+        return (float(self.seconds[0]),)
 
     @property
     def rows(self):
@@ -224,6 +262,8 @@ class Capture:
             "nominal_pitch_mm": self.positive_pitch,
             "dark_passes": len(self.dark),
             "white_passes": len(self.white),
+            "reference_events": 2 if self.paired_references else 1,
+            "reference_seconds": list(self.reference_event_seconds()),
         }
 
 
@@ -275,6 +315,23 @@ def clock_vector(array, rows):
     if np.any(np.diff(values) < 1e-9):
         raise UserInputError("Capture times must increase by at least one nanosecond in scan order.")
     return values
+
+
+def reference_clock(array, paired):
+    expected = 2 if paired else 1
+    if array is None:
+        return None
+    values = np.asarray(array)
+    if values.shape != (expected,) or values.dtype.kind not in "iuf":
+        raise UserInputError(
+            "Reference times must provide one numeric value for each reference event."
+        )
+    times = immutable_array(values, "<f8")
+    if not np.all(np.isfinite(times)) or np.max(np.abs(times)) > 1e12:
+        raise UserInputError("Reference times must be finite and within ±10¹² seconds.")
+    if np.any(np.diff(times) < 1e-9):
+        raise UserInputError("Reference times must increase in event order.")
+    return times
 
 
 def immutable_array(value, dtype):

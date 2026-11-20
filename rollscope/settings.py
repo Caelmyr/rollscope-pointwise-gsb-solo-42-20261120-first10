@@ -14,6 +14,7 @@ class CalibrationSettings:
     minimum_response: int = 1000
     maximum_reference_noise: float = 220.0
     saturation_code: int = 65520
+    reference_trust_reach_fraction: float = 0.25
 
     @classmethod
     def parse(cls, data):
@@ -27,6 +28,12 @@ class CalibrationSettings:
             ),
             saturation_code=whole_number(
                 value["saturation_code"], "Saturation code", 128, 65535
+            ),
+            reference_trust_reach_fraction=finite_number(
+                value["reference_trust_reach_fraction"],
+                "Single-reference trust reach",
+                0.0,
+                1.0,
             ),
         )
 

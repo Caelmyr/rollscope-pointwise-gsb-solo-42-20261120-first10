@@ -18,7 +18,9 @@
         <tr><td>raw</td><td>8–4096 × 16–1024 integers</td><td>Sensor codes 0–65535, scan lines in arrival order</td></tr>
         <tr><td>ticks</td><td>One integer per line</td><td>Nondecreasing encoder tick, including multiple scans at the same tick</td></tr>
         <tr><td>seconds</td><td>One number per line</td><td>Strictly increasing time in seconds, at least 1 ns apart</td></tr>
-        <tr><td>dark, white</td><td>1–64 passes × raw columns each</td><td>Dark and white reference sensor codes in the same detector columns</td></tr>
+        <tr><td>dark, white</td><td>1–64 passes × raw columns each</td><td>Start-of-roll dark and white reference sensor codes in the same detector columns</td></tr>
+        <tr><td>dark_end, white_end</td><td>Optional, same shapes as dark/white</td><td>End-of-roll references. Both must be present together; the app then transitions column-by-column from the start set to the end set along scan station</td></tr>
+        <tr><td>reference_seconds</td><td>Optional, one number per reference event (1 or 2)</td><td>Capture times of the reference events; increasing in event order. Defaults to the first/last scan times when omitted</td></tr>
         <tr><td>metadata_utf8</td><td>1D uint8</td><td>UTF-8 JSON carrying capture metadata and physical geometry</td></tr>
       </tbody>
     </table>
@@ -36,6 +38,8 @@
   }
 }</pre>
     <p>Station is origin plus tick × pitch. Transverse position is origin plus a zero-based column × pitch. Reflection values are dimensionless relative to the dark and white references. The preview applies display scaling; the probe and evidence retain measured values.</p>
+    <h2>Timed start and end references</h2>
+    <p>Bundles with only <code>dark</code> and <code>white</code> open exactly as before and apply that single reference set to every scan line. When <code>dark_end</code> and <code>white_end</code> are supplied, each detector column is checked independently at both reference events and the effective dark/white level transitions linearly from the start event to the end event along the scan station. A column rejected at one event still produces evidence near the other event, up to the configurable single-reference trust reach (a fraction of the roll length); beyond that reach the cell is marked unknown rather than extrapolated. Columns rejected at both events, or saturated scan pixels, stay unknown across the whole capture. The probe reports the reference basis (start, end, blended or unknown), the weight taken from each event, their recorded times, and the contributing raw scan lines. Evidence NPZ exports carry the same basis and transition arrays and the settings JSON that produced them, so a downloaded source can be re-opened with identical settings.</p>
     <h2>Review workflow</h2>
     <ol>
       <li>Open the raw scan and check acquisition events. Use Coverage to see gaps and rejected detector columns separately.</li>

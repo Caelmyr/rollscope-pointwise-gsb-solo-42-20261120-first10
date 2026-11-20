@@ -22,6 +22,7 @@ const SETTINGS = {
     ['minimum_response', 'Minimum response (ADU)', '1'],
     ['maximum_reference_noise', 'Maximum reference variation (ADU)'],
     ['saturation_code', 'Saturation code (ADU)', '1'],
+    ['reference_trust_reach_fraction', 'Single-reference trust reach (fraction of roll)'],
   ],
   grid: [
     ['pitch_mm', 'Station pitch (mm)'],
@@ -68,7 +69,7 @@ const SETTINGS = {
 const LEGEND = {
   overview: [['reflectance', 'Reflectance'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   sensor: [['reflectance', 'Raw sensor codes']],
-  flat: [['reflectance', 'Reflectance'], ['bad', 'Rejected column or pixel']],
+  flat: [['reflectance', 'Reflectance'], ['blend', 'Blended start/end reference'], ['bad', 'Rejected, saturated or beyond trust reach']],
   coverage: [['native', 'Native'], ['blend', 'Interpolated'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   edges: [['edge', 'Tracked edge'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   spots: [['dark', 'Darker contrast'], ['bright', 'Brighter contrast'], ['gap', 'Encoder gap'], ['bad', 'Excluded area']],
@@ -529,8 +530,16 @@ function renderProbe(body) {
   const result = chosen.probe
   const { lineage } = result
   const values = { ...result }
-  for (const key of ["coordinate", "lineage", "sources", "layer", "revision"]) delete values[key]
+  for (const key of ["coordinate", "lineage", "sources", "layer", "revision",
+    "start_dark_code", "start_white_code", "start_reference_faults",
+    "end_dark_code", "end_white_code", "end_reference_faults",
+    "start_reference_weight", "end_reference_weight", "reference_basis",
+    "transition_fraction", "reference_time_s", "start_reference_time_s",
+    "end_reference_time_s"]) delete values[key]
   body.append(title('Selected cell'), keyValues(values))
+  if (typeof result.reference_basis === 'string') {
+    body.append(referencePanel(result))
+  }
   if (typeof lineage.sum_of_weights === 'number') {
     body.append(keyValues({
       composed_reflectance: lineage.composed_reflectance,
@@ -551,6 +560,47 @@ function renderProbe(body) {
     }
     body.append(chart(plot))
   }
+}
+
+function referencePanel(result) {
+  const wrap = element('div', null, 'reference-panel')
+  wrap.append(title('Flat-field reference'))
+  const basis = result.reference_basis
+  const basisLine = element('p', null, 'basis-line basis-' + basis)
+  basisLine.textContent = {
+    blended: 'Blended from start and end references',
+    start: 'Start-of-roll reference only',
+    end: 'End-of-roll reference only',
+    unknown: 'Unknown — no trusted reference within reach',
+  }[basis] || basis
+  wrap.append(basisLine)
+  if (basis !== 'unknown') {
+    wrap.append(keyValues({
+      start_reference_weight: result.start_reference_weight,
+      end_reference_weight: result.end_reference_weight,
+      transition_fraction: result.transition_fraction,
+    }))
+  }
+  const startEvents = {
+    start_dark_code: result.start_dark_code,
+    start_white_code: result.start_white_code,
+    start_reference_faults: result.start_reference_faults,
+  }
+  if (typeof result.start_reference_time_s === 'number') {
+    startEvents.start_reference_time_s = result.start_reference_time_s
+  } else {
+    startEvents.reference_time_s = result.reference_time_s
+  }
+  wrap.append(element('h4', 'Start reference', 'detail-title'), keyValues(startEvents))
+  if (typeof result.end_dark_code === 'number') {
+    wrap.append(element('h4', 'End reference', 'detail-title'), keyValues({
+      end_dark_code: result.end_dark_code,
+      end_white_code: result.end_white_code,
+      end_reference_faults: result.end_reference_faults,
+      end_reference_time_s: result.end_reference_time_s,
+    }))
+  }
+  return wrap
 }
 
 function reviewChoice(item, active, onClick, sublabel) {

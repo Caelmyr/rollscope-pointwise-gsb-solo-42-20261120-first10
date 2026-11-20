@@ -25,21 +25,38 @@ def point_measurement(context, spec, x, y):
 def acquisition_point(context, row, column):
     capture = context.capture
     corrected = context.calibrated
-    profile = corrected.reference
-    return {
+    profile = corrected.start
+    start_weight, end_weight = corrected.reference_weights(row, column)
+    result = {
         "row": row,
         "source_line": row,
         "encoder_tick": int(capture.ticks[row]),
         "time_s": float(capture.seconds[row]),
         "station_mm": float(capture.stations[row]),
         "sensor_code": int(capture.raw[row, column]),
-        "dark_code": float(profile.dark[column]),
-        "white_code": float(profile.white[column]),
-        "reference_faults": list(profile.fault_names(column)),
+        "reference_basis": corrected.basis_name(row, column),
+        "transition_fraction": float(corrected.transition[row]),
+        "start_reference_weight": start_weight,
+        "end_reference_weight": end_weight,
+        "start_dark_code": float(profile.dark[column]),
+        "start_white_code": float(profile.white[column]),
+        "start_reference_faults": list(profile.fault_names(column)),
         "sample_saturated": bool(corrected.clipped[row, column]),
         "valid": bool(corrected.valid[row, column]),
         "reflectance": safe_value(corrected.values[row, column]),
     }
+    if corrected.paired:
+        end = corrected.end
+        result.update(
+            end_dark_code=float(end.dark[column]),
+            end_white_code=float(end.white[column]),
+            end_reference_faults=list(end.fault_names(column)),
+            start_reference_time_s=corrected.reference_seconds[0],
+            end_reference_time_s=corrected.reference_seconds[1],
+        )
+    else:
+        result["reference_time_s"] = corrected.reference_seconds[0]
+    return result
 
 
 def station_point(context, row, column, layer):
