@@ -10,6 +10,7 @@ from . import __version__
 from .analysis import AnalysisPresenter
 from .capture_codec import canonical_json
 from .domain import UserInputError
+from .grain import presentation as grain_report, source_profile
 from .inspection_sheet import window_sheet
 from .raster import Layer, RasterSpec, png_bytes, preview_image
 from .window_review import WindowCells, review_window, row_provenance, source_rows
@@ -86,8 +87,8 @@ class Evidence:
     def json(self, name, document):
         self.add(name, canonical_json(document))
 
-    def raster(self, name, context, spec):
-        image, geometry = preview_image(context, spec)
+    def raster(self, name, context, spec, grain=None):
+        image, geometry = preview_image(context, spec, grain)
         self.add(name, png_bytes(image))
         return geometry.as_dict()
 
@@ -214,5 +215,96 @@ def current_package(record, context, section):
             "project_capture_id": record.id,
             "revision": record.state.revision,
             "analysis": section,
+        }
+    )
+
+
+def tile_source_payload(source):
+    """Raw scan lines that produced a window, with their own geometry and references.
+
+    Station rows are samples on the analysis grid; the original scan lines are
+    looked up through the encoder grouping so the exported codes are the ones
+    the detector recorded, not resampled rows.
+    """
+    from .window_review import source_line_set
+
+    context = source.context
+    capture = context.capture
+    rows, columns = source.slices()
+    lines = np.array(source_line_set(context.grid, rows), dtype=np.int64)
+    selected = np.arange(columns.start, columns.stop, dtype=np.int64)
+    return npz_bytes(
+        capture_lines=lines,
+        capture_columns=selected,
+        raw=capture.raw[np.ix_(lines, selected)],
+        ticks=capture.ticks[lines],
+        seconds=capture.seconds[lines],
+        station_mm=capture.stations[lines],
+        transverse_mm=capture.transverse[columns],
+        dark=capture.dark[:, columns],
+        white=capture.white[:, columns],
+        grid_reflectance=context.grid.values[rows, columns],
+        grid_valid=context.grid.valid[rows, columns],
+        material=context.edges.material[rows, columns],
+    )
+
+
+def grain_package(record, context, comparison, settings, sources, region):
+    evidence = Evidence("grain")
+    evidence.json("inspection.json", grain_report(comparison))
+    evidence.json("settings.json", settings.as_dict())
+    evidence.json("selection.json", comparison.selection.as_dict())
+    evidence.table("target-tiles.csv", list(comparison.rows))
+    evidence.table("reference-a-tiles.csv", list(comparison.reference_a_rows))
+    evidence.table("reference-b-tiles.csv", list(comparison.reference_b_rows))
+    evidence.table(
+        "envelopes.csv",
+        [comparison.envelope_a.as_dict(), comparison.envelope_b.as_dict()],
+    )
+    bands = []
+    tiles = []
+    lines = []
+    for key in ("target", "reference_a", "reference_b"):
+        window = comparison.window(key)
+        evidence.json(f"window-{key}.json", window.summary())
+        for tile in window.tiles:
+            tiles.append({"window": key} | tile.evidence())
+            if not tile.measured:
+                continue
+            for band in tile.band_rows(window.wave_edges):
+                bands.append(
+                    {
+                        "window": key,
+                        "tile": tile.id,
+                        "station_mm": tile.station_mm,
+                        "transverse_mm": tile.transverse_mm,
+                        "from_mm": band["from_mm"],
+                        "to_mm": band["to_mm"],
+                        "fraction": band["fraction"],
+                    }
+                )
+        source = next((item for item in sources if item.role == key), None)
+        if source is not None:
+            evidence.add(f"source-{key}.npz", tile_source_payload(source))
+            for tile in window.measured_tiles:
+                lines.extend(
+                    row | {"window": key}
+                    for row in source_profile(comparison.contexts[key], window, tile)
+                )
+    evidence.table("tiles.csv", tiles)
+    evidence.table("wavelength-bands.csv", bands)
+    evidence.table("source-lines.csv", lines)
+    spec = RasterSpec(Layer.GRAIN, window=region)
+    evidence.json(
+        "raster-mapping.json",
+        evidence.raster("classification.png", context, spec, comparison),
+    )
+    return evidence.make(
+        {
+            "capture_sha256": record.sha256,
+            "project_capture_id": record.id,
+            "revision": record.state.revision,
+            "selection": comparison.selection.as_dict(),
+            "geometry": record.capture.metadata.geometry.as_dict(),
         }
     )

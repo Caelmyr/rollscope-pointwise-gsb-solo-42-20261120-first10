@@ -164,6 +164,56 @@ class TextureSettings:
 
 
 @dataclass(frozen=True)
+class GrainSettings:
+    tile_size_mm: float = 8.0
+    overlap_fraction: float = 0.5
+    minimum_wave_mm: float = 0.4
+    maximum_wave_mm: float = 8.0
+    minimum_coherence: float = 0.35
+    envelope_margin: float = 3.0
+    outlier_sigmas: float = 4.0
+    angle_tolerance_deg: float = 1.5
+    coarseness_ratio: float = 1.05
+    minimum_reference_tiles: int = 6
+    maximum_feature_share: float = 0.05
+
+    @classmethod
+    def parse(cls, data):
+        value = overlay(cls(), data, "Grain settings")
+        minimum = finite_number(value["minimum_wave_mm"], "Shortest grain wavelength", 0.05, 100)
+        maximum = finite_number(value["maximum_wave_mm"], "Longest grain wavelength", 0.1, 500)
+        if maximum <= minimum:
+            raise UserInputError("The longest grain wavelength must exceed the shortest.")
+        return cls(
+            tile_size_mm=finite_number(value["tile_size_mm"], "Grain tile size", 2, 120),
+            overlap_fraction=finite_number(value["overlap_fraction"], "Grain tile overlap", 0, 0.9),
+            minimum_wave_mm=minimum,
+            maximum_wave_mm=maximum,
+            minimum_coherence=finite_number(
+                value["minimum_coherence"], "Minimum grain coherence", 0.05, 0.95
+            ),
+            envelope_margin=finite_number(
+                value["envelope_margin"], "Reference envelope width (sigma)", 0.5, 8
+            ),
+            outlier_sigmas=finite_number(
+                value["outlier_sigmas"], "Reference outlier cutoff", 1.5, 10
+            ),
+            angle_tolerance_deg=finite_number(
+                value["angle_tolerance_deg"], "Minimum direction tolerance", 0.5, 45
+            ),
+            coarseness_ratio=finite_number(
+                value["coarseness_ratio"], "Minimum coarseness tolerance", 1.01, 3
+            ),
+            minimum_reference_tiles=whole_number(
+                value["minimum_reference_tiles"], "Minimum reference tiles", 3, 200
+            ),
+            maximum_feature_share=finite_number(
+                value["maximum_feature_share"], "Maximum feature share per tile", 0, 1
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class SpliceSettings:
     contrast: float = 0.08
     minimum_fraction: float = 0.65
@@ -191,6 +241,7 @@ SETTINGS_TYPES = {
     "streaks": StreakSettings,
     "marks": MarkSettings,
     "texture": TextureSettings,
+    "grain": GrainSettings,
     "splices": SpliceSettings,
 }
 
@@ -204,6 +255,7 @@ class AnalysisSettings:
     streaks: StreakSettings
     marks: MarkSettings
     texture: TextureSettings
+    grain: GrainSettings
     splices: SpliceSettings
 
     @classmethod

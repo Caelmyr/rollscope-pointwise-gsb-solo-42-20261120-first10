@@ -151,6 +151,28 @@ def capture(ref):
     return capture_service().capture_details(ref)
 
 
+@api.get("/captures/<ref>/grain")
+def grain(ref):
+    return capture_service().grain_comparison(ref)
+
+
+@api.put("/captures/<ref>/grain")
+def set_grain(ref):
+    data, revision = body(("reference_a", "reference_b", "target"), with_revision=True)
+    return capture_service().set_grain_selection(ref, revision, data)
+
+
+@api.get("/captures/<ref>/grain/export")
+def grain_export(ref):
+    payload = capture_service().grain_export(ref)
+    return stream_attachment(payload, f"rollscope-{ref}-grain.zip", "application/zip")
+
+
+@api.get("/captures/<ref>/grain/tiles/<role>/<int:tile_id>")
+def grain_tile(ref, role, tile_id):
+    return capture_service().grain_tile(ref, role, tile_id)
+
+
 @api.get("/captures/<ref>/source")
 def source(ref):
     service = capture_service()

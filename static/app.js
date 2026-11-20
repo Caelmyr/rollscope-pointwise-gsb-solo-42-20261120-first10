@@ -11,6 +11,7 @@ const VIEW = {
   marks: ['Repeat pitch', 'Dark repeat marks and measured station spacing', 'marks', 'marks'],
   splices: ['Transverse joins', 'Same-sign contrast across the material width', 'splices', 'splices'],
   texture: ['Texture', 'Stripe direction estimated inside supported material tiles', 'texture', 'texture'],
+  grain: ['Grain conformance', 'Grain direction and coarseness against two signed-off windows', 'grain'],
   illumination: ['Reflectance trend', 'Across-strip and along-roll material reflectance', 'illumination'],
   windows: ['Review windows', 'Saved bounds in physical station coordinates', 'station'],
   ruler: ['Ruler', 'Measure across sheet, bad pixels and acquisition gaps', 'station'],
@@ -57,6 +58,19 @@ const SETTINGS = {
     ['minimum_wave_mm', 'Shortest wavelength (mm)'],
     ['maximum_wave_mm', 'Longest wavelength (mm)'],
   ],
+  grain: [
+    ['tile_size_mm', 'Grain tile size (mm)', '0.1'],
+    ['overlap_fraction', 'Tile overlap fraction'],
+    ['minimum_wave_mm', 'Shortest grain wavelength (mm)'],
+    ['maximum_wave_mm', 'Longest grain wavelength (mm)'],
+    ['minimum_coherence', 'Minimum grain coherence'],
+    ['envelope_margin', 'Reference envelope width (sigma)'],
+    ['outlier_sigmas', 'Reference outlier cutoff (sigma)'],
+    ['angle_tolerance_deg', 'Minimum direction tolerance (deg)'],
+    ['coarseness_ratio', 'Minimum coarseness tolerance (ratio)'],
+    ['minimum_reference_tiles', 'Minimum reference tiles', '1'],
+    ['maximum_feature_share', 'Maximum feature share per tile'],
+  ],
   splices: [
     ['contrast', 'Minimum join contrast'],
     ['minimum_fraction', 'Minimum width fraction'],
@@ -76,6 +90,7 @@ const LEGEND = {
   marks: [['dark', 'Detected mark'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   splices: [['splice', 'Join candidate'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
   texture: [['edge', 'Stripe direction'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
+  grain: [['both', 'Both references'], ['only-a', 'Only reference A'], ['only-b', 'Only reference B'], ['neither', 'Neither reference'], ['gap', 'Encoder gap'], ['bad', 'Unknown, feature or unavailable']],
   illumination: [['reflectance', 'Reflectance'], ['gap', 'Encoder gap'], ['bad', 'Invalid sample']],
 }
 
@@ -95,6 +110,9 @@ const chosen = {
   window: '',
   reviewed: '',
   windowReport: null,
+  grain: null,
+  grainTile: null,
+  grainTileKey: '',
   snapshot: null,
   compare: null,
   probe: null,
@@ -107,7 +125,7 @@ const chosen = {
 }
 
 let toastTimer
-const regularView = () => !['windows', 'ruler', 'snapshots'].includes(chosen.section)
+const regularView = () => !['windows', 'ruler', 'snapshots', 'grain'].includes(chosen.section)
 const layer = () => VIEW[chosen.section][2]
 const revision = () => chosen.capture.state.revision
 const base = () => '/api/captures/' + chosen.capture.id
@@ -206,6 +224,7 @@ async function openCapture(id, reset = true) {
     Object.assign(chosen, {
       section: 'overview', tab: 'analysis', window: '', reviewed: '', snapshot: null,
       compare: null, probe: null, profile: null, ruler: null, rulerPoints: [],
+      grain: null, grainTile: null, grainTileKey: '',
     })
   }
   $('#capture-picker').value = detail.id
@@ -255,7 +274,7 @@ async function renderView() {
   const [title, description] = VIEW[chosen.section]
   const raw = layer() === 'sensor' || layer() === 'flat'
   $('#marker').hidden = true
-  $('#window-picker').disabled = raw || chosen.section === 'ruler'
+  $('#window-picker').disabled = raw || chosen.section === 'ruler' || chosen.section === 'grain'
   $('#view-title').textContent = title
   $('#view-subtitle').textContent = description
   $('#axis-y-caption').textContent = raw ? 'ACQUISITION LINE' : 'STATION · MM'
@@ -273,16 +292,25 @@ async function renderView() {
     ? 'Select two points on the station image.'
     : 'Select a pixel to inspect its source lines.'
   const sectionLink = $('#section-download')
-  sectionLink.hidden = !regularView()
-  if (regularView()) {
+  sectionLink.hidden = false
+  sectionLink.textContent = chosen.section === 'grain' ? 'Export grain evidence ↗' : 'Export ZIP ↗'
+  if (chosen.section === 'grain') {
+    sectionLink.href = base() + '/grain/export'
+  } else if (regularView()) {
     sectionLink.href = anchorURL(base() + `/analysis/${chosen.section}/export`, { revision: revision() })
+  } else {
+    sectionLink.hidden = true
   }
   const parameters = viewParams({ overlay: $('#overlay-toggle').checked ? 1 : 0 })
   const viewURL = anchorURL(base() + '/view', parameters)
   const imageURL = anchorURL(base() + '/preview.png', parameters)
+  let grainUnready = chosen.section === 'grain' && !chosen.grain?.configured
+  let grainOffCapture = false
   const analysisURL = regularView()
     ? anchorURL(base() + '/analysis/' + chosen.section, { revision: revision() })
-    : null
+    : chosen.section === 'grain'
+      ? base() + '/grain'
+      : null
   chosen.extent = null
   chosen.analysis = null
   chosen.probe = null
@@ -296,15 +324,30 @@ async function renderView() {
     ])
     if (token !== chosen.request) return
     chosen.extent = result[0]
-    chosen.analysis = result[1]
+    if (chosen.section === 'grain') {
+      chosen.grain = result[1]
+      if (result[1]?.selection) chosen.grainSelection = result[1].selection
+      grainUnready = !result[1]?.configured
+      grainOffCapture = Boolean(result[1]?.configured && result[1].target_capture !== chosen.capture.id)
+    } else {
+      chosen.analysis = result[1]
+    }
   } catch (error) {
     if (token === chosen.request) showErrorImage(error)
     throw error
   }
   const image = $('#raster')
-  image.src = imageURL
-  image.alt = title + ' image'
-  $('#empty-image').hidden = true
+  if (grainUnready || grainOffCapture) {
+    $('#raster').removeAttribute('src')
+    $('#empty-image').textContent = grainUnready
+      ? 'Choose two signed-off windows and a target window to draw the grain classification.'
+      : `The target window is on ${chosen.grain.target_capture_name || 'another capture'}. Open that capture to see the classification map.`
+    $('#empty-image').hidden = false
+  } else {
+    image.src = imageURL
+    image.alt = title + ' image'
+    $('#empty-image').hidden = true
+  }
   $('#grid-size').textContent = `${whole.format(chosen.extent.source_width)} × ${whole.format(chosen.extent.source_height)} cells`
   paintTicks()
   renderInspector()
@@ -361,6 +404,7 @@ function renderInspector() {
   if (chosen.section === 'windows') return renderWindows(body)
   if (chosen.section === 'ruler') return renderRuler(body)
   if (chosen.section === 'snapshots') return renderSnapshots(body)
+  if (chosen.section === 'grain') return renderGrain(body)
   if (!chosen.analysis) {
     body.append(copy('Loading measurements…'))
     return
@@ -392,6 +436,7 @@ function tableBlocks() {
     ]
   }
   if (chosen.section === 'snapshots' && chosen.snapshot) return chosen.snapshot.result.tables
+  if (chosen.section === 'grain') return grainTables()
   return chosen.analysis?.tables || []
 }
 
@@ -406,7 +451,10 @@ function renderTables() {
   $('#tables-subhead').textContent = VIEW[chosen.section][0]
   $('#tables').replaceChildren(...blocks.map((report) => {
     const group = element('section')
-    group.append(element('h3', report.title, 'table-title'), table(report.rows, guarded(locate)))
+    const picker = chosen.section === 'grain' && report.scope === 'target'
+      ? guarded(locateGrainTile)
+      : guarded(locate)
+    group.append(element('h3', report.title, 'table-title'), table(report.rows, picker))
     return group
   }))
 }
@@ -829,6 +877,246 @@ async function inspectSnapshot(id) {
   chosen.compare = null
   renderInspector()
   renderTables()
+}
+
+
+const GRAIN_CLASSES = [
+  ['both_references', 'Supports both references'],
+  ['only_reference_a', 'Only reference A'],
+  ['only_reference_b', 'Only reference B'],
+  ['neither_reference', 'Neither reference'],
+  ['unknown', 'Unknown'],
+]
+
+const GRAIN_ROLES = [
+  ['reference_a', 'Reference A (signed off)'],
+  ['reference_b', 'Reference B (signed off)'],
+  ['target', 'New roll (target)'],
+]
+
+function grainKey(reference) {
+  return reference ? reference.capture + ':' + reference.window : ''
+}
+
+function grainChoice(reference) {
+  if (!reference) return ''
+  return `${reference.capture}|${reference.window}`
+}
+
+function splitChoice(value) {
+  if (!value) return null
+  const [capture, window] = value.split('|')
+  return capture && window ? { capture, window } : null
+}
+
+function grainCounts() {
+  if (!chosen.grain?.matrix) return null
+  return chosen.grain.matrix.target
+}
+
+function renderGrain(body) {
+  if (!chosen.grain) {
+    body.append(copy('Comparing grain against the signed-off windows…'))
+    return
+  }
+  const report = chosen.grain
+  const configured = Boolean(report?.configured)
+  body.append(title('Signed-off windows'), copy(
+    'Choose the two approved windows as references and the window on the new roll to test. ' +
+    'Direction and coarseness are compared in millimetres; lighting is normalized out.'
+  ))
+  body.append(grainChooser(report?.catalog || [], report?.selection || chosen.grainSelection))
+  if (!configured) {
+    body.append(copy('Both signed-off windows are required before a comparison can run.'))
+    return
+  }
+  body.append(title('Result'), keyValues(grainSummaryValues(report.summary)))
+  body.append(grainClassList(report.summary, grainCounts()))
+  body.append(title('Signed-off envelopes'), keyValues(grainEnvelopeValues(report)))
+  const rows = grainTileRows(report).slice(0, 40)
+  body.append(title('Inspect a tile'), copy(
+    'Pick a row to inspect its direction, coarseness and the raw scan lines behind it. ' +
+    'The measurement tables below also locate tiles on the image.'
+  ))
+  body.append(table(rows, guarded(locateGrainTile), 'table-scroll mini-table'))
+  if (chosen.grainTile) body.append(grainTilePanel(chosen.grainTile))
+  else body.append(copy('No tile selected yet.'))
+}
+
+function grainSummaryValues(summary) {
+  const values = {
+    target_window: summary.target_window,
+    reference_a: summary.reference_a,
+    reference_b: summary.reference_b,
+    tile_size_mm: `${format(summary.tile_height_mm)} × ${format(summary.tile_width_mm)}`,
+    both_references_tiles: summary.both_references_tiles,
+    only_reference_a_tiles: summary.only_reference_a_tiles,
+    only_reference_b_tiles: summary.only_reference_b_tiles,
+    neither_reference_tiles: summary.neither_reference_tiles,
+    unknown_tiles: summary.unknown_tiles,
+    unknown_feature_tiles: summary.unknown_feature_tiles,
+    unknown_unsupported_tiles: summary.unknown_unsupported_tiles,
+    unknown_outside_tiles: summary.unknown_outside_tiles,
+    unknown_faint_tiles: summary.unknown_faint_tiles,
+    both_references_fraction: summary.both_references_fraction,
+    outside_normal_fraction: summary.outside_normal_fraction,
+    target_direction_median_deg: summary.target_direction_median_deg,
+    target_coarseness_median_mm: summary.target_coarseness_median_mm,
+  }
+  return values
+}
+
+function grainEnvelopeValues(report) {
+  const values = {}
+  for (const envelope of report.references || []) {
+    const label = envelope.key === 'a' ? 'Reference A' : 'Reference B'
+    values[label] = {
+      window: envelope.window,
+      status: envelope.status,
+      direction_center_deg: envelope.direction_center_deg,
+      direction_tolerance_deg: envelope.direction_tolerance_deg,
+      coarseness_center_mm: envelope.coarseness_center_mm,
+      coarseness_tolerance_ratio: envelope.coarseness_tolerance_ratio,
+      measured_tiles: envelope.measured_tiles,
+      trimmed_tiles: envelope.trimmed_tiles,
+    }
+  }
+  return values
+}
+
+function grainChooser(catalog, selection) {
+  const form = element('form')
+  const choices = [['', '— choose a window —']].concat(catalog.map((item) => [
+    `${item.capture_ref}|${item.window_id}`,
+    `${item.capture_name} · ${item.label}`,
+  ]))
+  for (const [role, label] of GRAIN_ROLES) {
+    form.append(field(label, role, grainChoice(selection?.[role]), { choices }))
+  }
+  const actions = element('div', null, 'field-row')
+  const submit = element('button', 'Compare grain', 'button primary small')
+  submit.type = 'submit'
+  actions.append(submit)
+  form.append(actions)
+  form.addEventListener('submit', guarded(async (event) => {
+    event.preventDefault()
+    const entries = new FormData(form)
+    const payload = { revision: revision() }
+    for (const [role] of GRAIN_ROLES) payload[role] = splitChoice(entries.get(role))
+    chosen.grainSelection = payload
+    const result = await send(base() + '/grain', payload, 'PUT')
+    chosen.capture.state = result.state
+    chosen.grainTile = null
+    chosen.grainTileKey = ''
+    await renderView()
+    notify('Grain comparison saved.')
+  }))
+  return form
+}
+
+function percentage(value) {
+  return typeof value === 'number' ? `${(value * 100).toFixed(1)}%` : '—'
+}
+
+function grainClassList(summary, counts) {
+  const list = element('dl', null, 'kv')
+  const total = summary.measured_tiles || 0
+  for (const [key, label] of GRAIN_CLASSES) {
+    const value = counts?.[key] ?? 0
+    const share = total && key !== 'unknown' ? ` (${(100 * value / total).toFixed(1)}%)` : ''
+    if (key === 'unknown') {
+      list.append(element('dt', label), element('dd', String(summary.unknown_tiles ?? 0)))
+    } else {
+      list.append(element('dt', label), element('dd', `${value}${share}`))
+    }
+  }
+  if (!total) {
+    list.append(element('dt', 'Measured tiles'), element('dd', 'None'))
+  }
+  return list
+}
+
+function grainTileRows(report) {
+  return (report.tables || [])
+    .filter((entry) => entry.key === 'grain_target_tiles')
+    .flatMap((entry) => entry.rows)
+}
+
+function grainTables() {
+  if (!chosen.grain?.configured) return []
+  const rows = grainTileRows(chosen.grain)
+  const measured = chosen.grain.summary.measured_tiles || 0
+  const extents = chosen.grain.extents || {}
+  const byClass = GRAIN_CLASSES.map(([key, label]) => {
+    const extent = extents[key] || {}
+    const count = rows.filter((row) => row.classification === key).length
+    return {
+      class: label,
+      tiles: count,
+      share_of_measured: key === 'unknown' || !measured ? null : count / measured,
+      station_from_mm: extent.station_from_mm ?? null,
+      station_to_mm: extent.station_to_mm ?? null,
+      transverse_from_mm: extent.transverse_from_mm ?? null,
+      transverse_to_mm: extent.transverse_to_mm ?? null,
+    }
+  })
+  const tables = [
+    { title: 'Tiles by conformance', rows: byClass },
+    { title: 'Target tile measurements', rows, scope: 'target' },
+  ]
+  for (const [key, label] of [['grain_reference_a_tiles', chosen.grain.summary.reference_a],
+                              ['grain_reference_b_tiles', chosen.grain.summary.reference_b]]) {
+    const entry = (chosen.grain.tables || []).find((item) => item.key === key)
+    if (entry) tables.push({ title: `${label} tile measurements`, rows: entry.rows })
+  }
+  const envelopes = (chosen.grain.tables || []).find((item) => item.key === 'grain_envelopes')
+  if (envelopes) tables.push({ title: 'Signed-off grain envelopes', rows: envelopes.rows })
+  return tables
+}
+
+async function locateGrainTile(data) {
+  const extent = chosen.extent
+  if (!extent || !data) return
+  const yCoord = (data.station_mm - extent.y_from) / (extent.y_to - extent.y_from || 1)
+  const xCoord = (data.transverse_mm - extent.x_from_mm) / (extent.x_to_mm - extent.x_from_mm || 1)
+  if (!(yCoord >= 0 && yCoord <= 1 && xCoord >= 0 && xCoord <= 1)) {
+    notify('That tile lies outside the current view.')
+    return
+  }
+  const key = `target:${data.tile}`
+  chosen.grainTileKey = key
+  chosen.grainTile = null
+  markPoint({ x: xCoord, y: yCoord })
+  const result = await json(`${base()}/grain/tiles/target/${data.tile}`)
+  if (chosen.grainTileKey !== key) return
+  chosen.grainTile = result
+  renderInspector()
+}
+
+function grainTilePanel(tile) {
+  const wrapper = element('section')
+  wrapper.append(title(`Tile ${tile.tile.tile} · ${tile.classification_title}`))
+  wrapper.append(keyValues({
+    station_mm: tile.tile.station_mm,
+    transverse_mm: tile.tile.transverse_mm,
+    direction_deg: tile.tile.direction_deg,
+    coherence: tile.tile.coherence,
+    coarseness_mm: tile.tile.coarseness_mm,
+    relative_amplitude: tile.tile.relative_amplitude,
+    state: tile.tile.state,
+    unknown_reason: tile.unknown_reason,
+    nearest_reference: tile.nearest_reference,
+    limiting_feature: tile.limiting_feature,
+    size_mm: `${format(tile.tile.height_mm)} × ${format(tile.tile.width_mm)}`,
+  }))
+  const bands = { title: 'Wavelength share', x: 'from_mm', y: ['fraction'], unit: 'fraction', records: tile.bands }
+  wrapper.append(chart(bands))
+  const lines = tile.source_lines || []
+  if (lines.length) {
+    wrapper.append(title('Source scan lines'))
+    wrapper.append(table(lines, null, 'table-scroll mini-table'))
+  }
+  return wrapper
 }
 
 function renderSnapshots(body) {

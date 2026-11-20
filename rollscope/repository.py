@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .capture_codec import canonical_json, capture_bytes, capture_hash, read_capture
 from .domain import MissingRecord, RevisionConflict, UserInputError, clean_text
+from .grain import GrainSelection
 from .records import MAX_SNAPSHOTS, CaptureState, InspectionSnapshot, identifier, utc_now
 
 
@@ -31,6 +32,11 @@ CREATE TABLE IF NOT EXISTS snapshots (
     created_at TEXT NOT NULL,
     record TEXT NOT NULL,
     summary TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS grain_links (
+    capture_id TEXT PRIMARY KEY REFERENCES captures(id),
+    selection TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS snapshots_by_capture ON snapshots(capture_id, created_at DESC, id);
 CREATE INDEX IF NOT EXISTS captures_by_date ON captures(created_at DESC, id);
@@ -210,6 +216,9 @@ class Repository:
         row = connection.execute("SELECT * FROM captures WHERE id = ?", (ref,)).fetchone()
         if row is None:
             raise MissingRecord("That capture is not in the local library.")
+        return self.capture_record(row)
+
+    def capture_record(self, row):
         return CaptureRecord(
             row["id"],
             row["source_sha"],
@@ -307,3 +316,76 @@ class Repository:
         if row is None:
             raise MissingRecord("That capture is not in the local library.")
         return row["bundle"]
+
+    def grain_selection(self, ref):
+        with self.open() as connection:
+            row = connection.execute(
+                "SELECT selection FROM grain_links WHERE capture_id = ?", (ref,)
+            ).fetchone()
+        if row is None:
+            return None
+        return GrainSelection.parse(read_json(row["selection"]))
+
+    def write_grain_selection(self, connection, ref, selection):
+        connection.execute(
+            "INSERT INTO grain_links(capture_id, selection, updated_at) VALUES(?, ?, ?) "
+            "ON CONFLICT(capture_id) DO UPDATE SET selection = excluded.selection, "
+            "updated_at = excluded.updated_at",
+            (ref, stored_json(selection.as_dict()), utc_now()),
+        )
+
+    def set_grain_selection(self, ref, selection):
+        with self.writing() as connection:
+            if connection.execute(
+                "SELECT id FROM captures WHERE id = ?", (ref,)
+            ).fetchone() is None:
+                raise MissingRecord("That capture is not in the local library.")
+            self.write_grain_selection(connection, ref, selection)
+        return selection
+
+    def with_grain_selections(self, refs):
+        ids = list(dict.fromkeys(refs))
+        if not ids:
+            return {}
+        placeholders = ", ".join("?" for _ in ids)
+        with self.open() as connection:
+            rows = connection.execute(
+                f"SELECT capture_id, selection FROM grain_links WHERE capture_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        return {
+            row["capture_id"]: GrainSelection.parse(read_json(row["selection"]))
+            for row in rows
+        }
+
+    def grain_linked_captures(self):
+        with self.open() as connection:
+            rows = connection.execute(
+                "SELECT capture_id, selection FROM grain_links ORDER BY updated_at DESC"
+            ).fetchall()
+        return [
+            read_json(row["selection"]) | {"capture_id": row["capture_id"]}
+            for row in rows
+        ]
+
+    def list_window_catalog(self):
+        """Every saved window in the library, for choosing grain references across captures.
+
+        Only the stored state and header are read; capture bundles are left on disk.
+        """
+        with self.open() as connection:
+            rows = connection.execute(
+                "SELECT id, overview, state FROM captures ORDER BY created_at DESC, id"
+            ).fetchall()
+        catalog = []
+        for row in rows:
+            overview = read_json(row["overview"])
+            state = CaptureState.from_dict(read_json(row["state"]))
+            catalog.append(
+                {
+                    "capture_ref": row["id"],
+                    "capture_name": overview.get("name", ""),
+                    "windows": state.windows,
+                }
+            )
+        return catalog

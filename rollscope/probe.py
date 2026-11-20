@@ -7,7 +7,7 @@ from .presentation import extrema_indices
 from .raster import ACQUISITION_LAYERS, Layer, position_mapping
 
 
-def point_measurement(context, spec, x, y):
+def point_measurement(context, spec, x, y, grain=None):
     mapping = position_mapping(context, spec)
     row, column = mapping.cell(x, y)
     result = {
@@ -19,7 +19,7 @@ def point_measurement(context, spec, x, y):
     }
     if spec.layer in ACQUISITION_LAYERS:
         return result | acquisition_point(context, row, column)
-    return result | station_point(context, row, column, spec.layer)
+    return result | station_point(context, row, column, spec.layer, grain)
 
 
 def acquisition_point(context, row, column):
@@ -42,7 +42,25 @@ def acquisition_point(context, row, column):
     }
 
 
-def station_point(context, row, column, layer):
+def grain_pixel(comparison, row, column):
+    """The classified tile under one selected station cell, if any."""
+    if comparison is None:
+        return {}
+    window = comparison.window("target")
+    for entry in comparison.rows:
+        tile = window.tiles[entry["tile"] - 1]
+        if tile.row_start <= row < tile.row_stop and tile.column_start <= column < tile.column_stop:
+            return {
+                "grain_tile": tile.id,
+                "grain_class": entry["classification"],
+                "grain_state": tile.state.value,
+                "grain_direction_deg": tile.direction_deg,
+                "grain_coarseness_mm": tile.coarseness_mm,
+            }
+    return {}
+
+
+def station_point(context, row, column, layer, grain=None):
     grid = context.grid
     result = grid.provenance(row, column) | {
         "valid": bool(grid.valid[row, column]),
@@ -56,6 +74,8 @@ def station_point(context, row, column, layer):
             detectable=bool(report.evidence[row, column]),
             signed_contrast=safe_value(report.residual[row, column]),
         )
+    if layer == Layer.GRAIN:
+        result.update(grain_pixel(grain, row, column))
     return result
 
 

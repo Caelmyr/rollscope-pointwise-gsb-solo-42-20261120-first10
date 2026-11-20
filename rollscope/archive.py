@@ -10,6 +10,7 @@ from zipfile import BadZipFile, ZipFile
 from .analysis import SECTION_TITLES
 from .capture_codec import MAX_BUNDLE_BYTES, capture_bytes, capture_hash, read_capture
 from .domain import UserInputError, clean_text, exact_keys, expect_object, whole_number
+from .grain import GrainSelection
 from .evidence import EVIDENCE_FORMAT, Evidence
 from .records import MAX_SNAPSHOTS, MAX_WINDOWS, CaptureState, InspectionSnapshot, ReviewWindow
 from .settings import AnalysisSettings
@@ -24,6 +25,7 @@ ARCHIVE_ENTRIES = {
     "project.json": 16 * 1024,
     "state.json": 256 * 1024,
     "snapshots.json": MAX_ARCHIVED_REPORT_BYTES,
+    "grain.json": 8 * 1024,
 }
 
 
@@ -34,15 +36,29 @@ class RestoredProject:
     source_name: str | None
     state: CaptureState
     snapshots: tuple
+    grain_selection: object | None = None
 
 
-def project_export(record, snapshots):
+def project_export(record, snapshots, grain_selection=None):
     bundle = Evidence("project")
     bundle.add("capture.npz", capture_bytes(record.capture))
     manifest = record.manifest()
     bundle.json("project.json", manifest)
     bundle.json("state.json", record.state.as_dict())
     bundle.json("snapshots.json", [snapshot.as_dict() for snapshot in snapshots])
+    contained = bool(grain_selection is not None and grain_selection.configured) and all(
+        getattr(grain_selection, role).capture == record.id
+        for role in ("reference_a", "reference_b", "target")
+    )
+    bundle.json(
+        "grain.json",
+        {
+            "selection": None if grain_selection is None else grain_selection.as_dict(),
+            # Only a link whose three windows are all archived with this capture can
+            # be restored; cross-capture references stay with their own projects.
+            "self_contained": contained,
+        },
+    )
     return bundle.make({"capture_sha256": record.sha256, "source_revision": record.state.revision})
 
 
@@ -64,11 +80,12 @@ def read_project(payload):
     if binding.get("source_revision") != state.revision:
         raise UserInputError("The project state does not match the exported revision.")
     snapshots = restore_snapshots(members["snapshots.json"], state, source_hash)
+    grain_selection = restore_grain(members["grain.json"], state)
     original_sha = read_hash(metadata.get("source_sha256"), optional=True)
     source_name = metadata.get("source_name")
     if source_name is not None:
         source_name = clean_text(source_name, "Archived source filename", 180)
-    return RestoredProject(capture, original_sha, source_name, state, snapshots)
+    return RestoredProject(capture, original_sha, source_name, state, snapshots, grain_selection)
 
 
 def bounded_read(archive, name, limit):
@@ -83,15 +100,21 @@ def bounded_read(archive, name, limit):
 
 
 def archive_members(archive):
+    names = sorted(archive.namelist())
     expected = sorted((*ARCHIVE_ENTRIES, "manifest.json"))
-    if sorted(archive.namelist()) != expected:
+    # Archives written before grain links existed have no grain.json member.
+    legacy = sorted((*[name for name in ARCHIVE_ENTRIES if name != "grain.json"], "manifest.json"))
+    if names not in (expected, legacy):
         raise UserInputError("Select a complete RollScope project archive.")
     document = bounded_read(archive, "manifest.json", 32 * 1024)
     manifest = json_document(document, "Archive manifest")
     if manifest.get("format") != EVIDENCE_FORMAT or manifest.get("kind") != "project":
         raise UserInputError("This archive does not contain a RollScope project.")
     declarations = manifest.get("members")
-    if not isinstance(declarations, list) or len(declarations) != len(ARCHIVE_ENTRIES):
+    if not isinstance(declarations, list) or len(declarations) not in (
+        len(ARCHIVE_ENTRIES),
+        len(ARCHIVE_ENTRIES) - 1,
+    ):
         raise UserInputError("The project archive member list is invalid.")
     found = {}
     for entry in declarations:
@@ -106,6 +129,8 @@ def archive_members(archive):
         if len(data) != expected_bytes or hashlib.sha256(data).hexdigest() != checksum:
             raise UserInputError(f"The checksum for {name} does not match the manifest.")
         found[name] = data
+    if "grain.json" not in found:
+        found["grain.json"] = json.dumps({"selection": None, "self_contained": False}).encode()
     return found, manifest
 
 
@@ -147,6 +172,24 @@ def timestamp(value):
     if parsed.tzinfo is None:
         raise UserInputError("Archive timestamps must include a time zone.")
     return value
+
+
+def restore_grain(payload, state):
+    """Keep a grain link when all three windows belong to the archived capture."""
+    data = json_document(payload, "Archived grain link")
+    exact_keys(data, ("selection", "self_contained"), "Archived grain link")
+    if data["self_contained"] is not True or data["selection"] is None:
+        return None
+    selection = GrainSelection.parse(data["selection"])
+    if not selection.configured:
+        return None
+    known = {window.id for window in state.windows}
+    if any(
+        selection.reference_for(role).window not in known
+        for role in ("reference_a", "reference_b", "target")
+    ):
+        return None
+    return selection
 
 
 def restore_state(payload, capture):

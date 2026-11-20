@@ -173,6 +173,10 @@ h2 { font-size: 17px; font-weight: 665; letter-spacing: -.025em; }
 .swatch.edge, .swatch.bright { background: var(--mint); }
 .swatch.dark { background: var(--amber); }
 .swatch.splice { background: #d09af2; }
+.swatch.both { background: #40c49f; }
+.swatch.only-a { background: #e8b25c; }
+.swatch.only-b { background: #96a4f4; }
+.swatch.neither { background: #e96f68; }
 .view-footer { display: flex; flex-wrap: wrap; gap: 4px 14px; justify-content: space-between; align-items: center; color: var(--quiet); font-size: 11px; padding: 9px 15px; margin-top: auto; }
 
 .inspector { overflow: hidden; display: flex; flex-direction: column; max-height: calc(clamp(486px, 51vh, 745px) + 151px); }

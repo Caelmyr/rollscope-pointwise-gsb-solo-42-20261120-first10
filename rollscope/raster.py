@@ -5,7 +5,7 @@ from enum import Enum
 import numpy as np
 from PIL import Image, ImageDraw
 
-from .domain import DISPLAY_HEIGHT, DISPLAY_WIDTH, StationWindow
+from .domain import DISPLAY_HEIGHT, DISPLAY_WIDTH, StationWindow, UserInputError
 from .grid import Support, index_near
 from .numerics import true_runs
 
@@ -22,6 +22,7 @@ class Layer(str, Enum):
     SPLICES = "splices"
     TEXTURE = "texture"
     ILLUMINATION = "illumination"
+    GRAIN = "grain"
 
 
 ACQUISITION_LAYERS = {Layer.SENSOR, Layer.FLAT}
@@ -185,6 +186,41 @@ def raw_layer(context, indices, calibrated):
     return gray_palette(values, low, high)
 
 
+def grain_layer(context, comparison, rows, columns, spec):
+    """Paint each target tile with its conformance class.
+
+    Tiles are coloured by their comparison row. Cells that were not evaluated
+    or that have unavailable samples keep the regular unknown hatching, so a
+    thick band of "neither" can be told apart from an unmeasured area.
+    """
+    from .grain import CLASS_COLORS
+
+    grid = context.grid
+    colors = {
+        "both_references": CLASS_COLORS["both_references"],
+        "only_reference_a": CLASS_COLORS["only_reference_a"],
+        "only_reference_b": CLASS_COLORS["only_reference_b"],
+        "neither_reference": CLASS_COLORS["neither_reference"],
+        "unknown": CLASS_COLORS["unknown"],
+    }
+    paint = np.empty(grid.shape + (3,), dtype=np.uint8)
+    paint[:, :] = (26, 33, 46)
+    if comparison is None:
+        color_unobserved(paint, np.zeros(grid.shape, dtype=bool), None)
+        return paint[rows[:, None], columns[None, :]].copy()
+    window = comparison.window("target")
+    for row in comparison.rows:
+        tile = window.tiles[row["tile"] - 1]
+        paint[
+            tile.row_start : tile.row_stop, tile.column_start : tile.column_stop
+        ] = colors[row["classification"]]
+    picture = paint[rows[:, None], columns[None, :]].copy()
+    support = grid.plan.support[rows]
+    valid = grid.valid[rows[:, None], columns[None, :]]
+    color_unobserved(picture, valid, support == Support.GAP)
+    return picture
+
+
 def grid_layer(context, indices, row_indices, layer):
     grid = context.grid
     support = grid.plan.support[row_indices]
@@ -207,12 +243,16 @@ def grid_layer(context, indices, row_indices, layer):
     return pixels
 
 
-def preview_image(context, spec):
+def preview_image(context, spec, grain=None):
     mapping = position_mapping(context, spec)
     rows, columns = map_limits(mapping)
     indices = np.ix_(rows, columns)
     if spec.layer in ACQUISITION_LAYERS:
         pixels = raw_layer(context, indices, calibrated=spec.layer == Layer.FLAT)
+    elif spec.layer == Layer.GRAIN:
+        if grain is None:
+            raise UserInputError("Choose two signed-off grain references first.")
+        pixels = grain_layer(context, grain, rows, columns, spec)
     else:
         pixels = grid_layer(context, indices, rows, spec.layer)
     image = Image.fromarray(pixels)
